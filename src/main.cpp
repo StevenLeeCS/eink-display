@@ -1,13 +1,22 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <cstring>
 
-#include "image_data.h"
+#include "ascii_font_16.h"
+#include "chinese_font_16.h"
+#include "voice_upload.h"
 
 namespace {
 
-constexpr uint16_t kDisplayWidth = 400;
-constexpr uint16_t kDisplayHeight = 300;
-constexpr size_t kFrameBytes = kDisplayWidth * kDisplayHeight / 8;
+constexpr uint16_t kPanelWidth = 400;
+constexpr uint16_t kPanelHeight = 300;
+constexpr uint16_t kDisplayWidth = kPanelHeight;
+constexpr uint16_t kDisplayHeight = kPanelWidth;
+constexpr size_t kPanelStride = kPanelWidth / 8;
+constexpr size_t kFrameBytes = kPanelWidth * kPanelHeight / 8;
+
+static_assert(kDisplayWidth * kDisplayHeight == kPanelWidth * kPanelHeight,
+              "Portrait and panel frame areas must match");
 
 // XIAO ESP32-C3 pin labels and GPIO numbers.
 constexpr int kPinMosi = 10;  // D10
@@ -19,9 +28,20 @@ constexpr int kPinBusy = 6;   // D4, HIGH while SSD1683 is busy
 
 constexpr uint32_t kSpiFrequency = 4000000;
 constexpr uint32_t kBusyTimeoutMs = 30000;
-
-static_assert(kImageDataSize == kFrameBytes,
-              "Image data must match the 400x300 display");
+constexpr uint8_t kVoiceRegionCount = 2;
+constexpr uint16_t kVoiceRegionHeight = kDisplayHeight / kVoiceRegionCount;
+constexpr uint16_t kVoiceDividerY = kVoiceRegionHeight - 1;
+constexpr uint16_t kVoiceMarkerX = 12;
+constexpr uint16_t kVoiceMarkerSize = 12;
+constexpr uint16_t kVoiceMarkerGap = 8;
+constexpr uint16_t kVoiceTextX =
+    kVoiceMarkerX + kVoiceMarkerSize + kVoiceMarkerGap;
+constexpr uint16_t kVoiceTextTopPadding = 10;
+constexpr uint16_t kVoiceTextWidth = kDisplayWidth - kVoiceTextX - 16;
+constexpr uint16_t kVoiceTextHeight =
+    kVoiceRegionHeight - 2 * kVoiceTextTopPadding;
+constexpr uint16_t kVoiceLineHeight = 20;
+constexpr uint8_t kFastRefreshesBeforeFull = 4;
 
 class Epd42 {
  public:
@@ -46,24 +66,46 @@ class Epd42 {
     data(updateControl, sizeof(updateControl));
     commandWithData(0x3C, 0x05);  // Border waveform.
     commandWithData(0x11, 0x03);  // Increment X, then Y.
-    setAddressWindow(0, 0, kDisplayWidth - 1, kDisplayHeight - 1);
+    setAddressWindow(0, 0, kPanelWidth - 1, kPanelHeight - 1);
     setCursor(0, 0);
     return waitUntilIdle("initialization");
   }
 
   bool display(const uint8_t* image) {
-    setCursor(0, 0);
-    command(0x24);  // Black/white RAM.
-    data(image, kFrameBytes);
+    if (image == nullptr) return false;
+
+    const uint8_t updateControl[] = {0x40, 0x00};
+    command(0x21);
+    data(updateControl, sizeof(updateControl));
+    commandWithData(0x3C, 0x05);
+
+    writeFrame(0x24, image);  // Black/white RAM.
+    writeFrame(0x26, image);  // Keep the second RAM synchronized.
 
     commandWithData(0x22, 0xF7);  // Load OTP LUT and perform full update.
     command(0x20);                // MASTER_ACTIVATION
     return waitUntilIdle("display update");
   }
 
-  void sleep() {
-    commandWithData(0x10, 0x01);  // Deep sleep; reset is required to wake.
-    delay(200);
+  bool displayFast(const uint8_t* framebuffer) {
+    if (framebuffer == nullptr) return false;
+
+    const uint8_t updateControl[] = {0x40, 0x00};
+    command(0x21);
+    data(updateControl, sizeof(updateControl));
+    commandWithData(0x3C, 0x05);
+
+    commandWithData(0x1A, 0x6E);  // Vendor 1.5-second fast waveform.
+    commandWithData(0x22, 0x91);  // Load the fast waveform from OTP.
+    command(0x20);
+    if (!waitUntilIdle("fast waveform setup")) return false;
+
+    writeFrame(0x24, framebuffer);
+    writeFrame(0x26, framebuffer);
+
+    commandWithData(0x22, 0xC7);  // Perform the vendor fast update.
+    command(0x20);
+    return waitUntilIdle("fast display update");
   }
 
  private:
@@ -106,6 +148,13 @@ class Epd42 {
     data(&value, 1);
   }
 
+  void writeFrame(uint8_t ramCommand, const uint8_t* image) {
+    setAddressWindow(0, 0, kPanelWidth - 1, kPanelHeight - 1);
+    setCursor(0, 0);
+    command(ramCommand);
+    data(image, kFrameBytes);
+  }
+
   void data(const uint8_t* bytes, size_t count) {
     SPI.beginTransaction(settings_);
     digitalWrite(kPinDc, HIGH);
@@ -139,19 +188,331 @@ class Epd42 {
 };
 
 Epd42 display;
+uint8_t framebuffer[kFrameBytes];
+bool voiceDisplayReady = false;
+uint8_t voiceFastRefreshes = 0;
+bool regionCompleted[kVoiceRegionCount] = {false, false};
+bool regionHasResult[kVoiceRegionCount] = {false, false};
+uint16_t regionMarkerX[kVoiceRegionCount] = {};
+uint16_t regionMarkerY[kVoiceRegionCount] = {};
+
+void setPixel(uint16_t x, uint16_t y, bool black) {
+  if (x >= kDisplayWidth || y >= kDisplayHeight) return;
+
+  // Logical portrait coordinates map to a panel rotated clockwise.
+  const uint16_t panelX = y;
+  const uint16_t panelY = kPanelHeight - 1 - x;
+  const size_t index = panelY * kPanelStride + panelX / 8;
+  const uint8_t mask = 0x80U >> (panelX & 0x07U);
+  if (black) {
+    framebuffer[index] &= static_cast<uint8_t>(~mask);
+  } else {
+    framebuffer[index] |= mask;
+  }
+}
+
+bool drawAsciiGlyph16(uint16_t x, uint16_t y, uint32_t codepoint) {
+  if (x + ascii16::kGlyphWidth > kDisplayWidth ||
+      y + ascii16::kGlyphHeight > kDisplayHeight) {
+    return false;
+  }
+
+  const uint8_t* glyph = ascii16::findGlyph(codepoint);
+  if (glyph == nullptr) return false;
+
+  for (uint16_t row = 0; row < ascii16::kGlyphHeight; ++row) {
+    for (uint16_t column = 0; column < ascii16::kGlyphWidth; ++column) {
+      const bool black = (glyph[row] & (0x80U >> column)) != 0;
+      setPixel(x + column, y + row, black);
+    }
+  }
+  return true;
+}
+
+bool drawChineseGlyph16(uint16_t x, uint16_t y, uint32_t codepoint) {
+  if (x + font16::kGlyphWidth > kDisplayWidth ||
+      y + font16::kGlyphHeight > kDisplayHeight) {
+    return false;
+  }
+
+  const uint8_t* glyph = font16::findGlyph(codepoint);
+  if (glyph == nullptr) return false;
+
+  for (uint16_t row = 0; row < font16::kGlyphHeight; ++row) {
+    for (uint16_t column = 0; column < font16::kGlyphWidth; ++column) {
+      const uint8_t value = glyph[row * 2 + column / 8];
+      const bool black = (value & (0x80U >> (column & 0x07U))) != 0;
+      setPixel(x + column, y + row, black);
+    }
+  }
+  return true;
+}
+
+uint16_t glyphWidth16(uint32_t codepoint) {
+  if (codepoint >= ascii16::kFirstCodepoint &&
+      codepoint <= ascii16::kLastCodepoint) {
+    return ascii16::kGlyphWidth;
+  }
+  return font16::findGlyph(codepoint) != nullptr ? font16::kGlyphWidth
+                                                  : ascii16::kGlyphWidth;
+}
+
+bool drawCodepoint16(uint16_t x, uint16_t y, uint32_t codepoint) {
+  if (codepoint >= ascii16::kFirstCodepoint &&
+      codepoint <= ascii16::kLastCodepoint) {
+    return drawAsciiGlyph16(x, y, codepoint);
+  }
+  if (drawChineseGlyph16(x, y, codepoint)) return true;
+  return drawAsciiGlyph16(x, y, '?');
+}
+
+bool readUtf8Codepoint(const char*& text, uint32_t& codepoint) {
+  const uint8_t first = static_cast<uint8_t>(*text++);
+  if (first < 0x80U) {
+    codepoint = first;
+    return true;
+  }
+
+  if (first >= 0xC2U && first <= 0xDFU) {
+    const uint8_t second = static_cast<uint8_t>(*text++);
+    if ((second & 0xC0U) != 0x80U) return false;
+    codepoint = ((first & 0x1FU) << 6) | (second & 0x3FU);
+    return true;
+  }
+
+  if (first >= 0xE0U && first <= 0xEFU) {
+    const uint8_t second = static_cast<uint8_t>(*text++);
+    const uint8_t third = static_cast<uint8_t>(*text++);
+    if ((second & 0xC0U) != 0x80U || (third & 0xC0U) != 0x80U) return false;
+    if ((first == 0xE0U && second < 0xA0U) ||
+        (first == 0xEDU && second >= 0xA0U)) {
+      return false;
+    }
+    codepoint = ((first & 0x0FU) << 12) | ((second & 0x3FU) << 6) |
+                (third & 0x3FU);
+    return true;
+  }
+
+  return false;
+}
+
+bool measureText16(const char* text, uint16_t& width) {
+  width = 0;
+  while (*text != '\0') {
+    uint32_t codepoint = 0;
+    if (!readUtf8Codepoint(text, codepoint)) return false;
+    const uint16_t glyphWidth = glyphWidth16(codepoint);
+    if (width > kDisplayWidth - glyphWidth) return false;
+    width += glyphWidth;
+  }
+  return width != 0;
+}
+
+bool drawText16(uint16_t x, uint16_t y, const char* text) {
+  while (*text != '\0') {
+    uint32_t codepoint = 0;
+    if (!readUtf8Codepoint(text, codepoint) ||
+        !drawCodepoint16(x, y, codepoint)) {
+      return false;
+    }
+    x += glyphWidth16(codepoint);
+  }
+  return true;
+}
+
+bool drawWrappedText16(uint16_t x, uint16_t y, uint16_t width,
+                       uint16_t height, const char* text) {
+  if (text == nullptr || *text == '\0') return false;
+
+  const uint16_t right = x + width;
+  const uint16_t bottom = y + height;
+  uint16_t cursorX = x;
+  uint16_t cursorY = y;
+  bool drewGlyph = false;
+
+  while (*text != '\0') {
+    uint32_t codepoint = 0;
+    if (!readUtf8Codepoint(text, codepoint)) codepoint = '?';
+    if (codepoint == '\r') continue;
+    if (codepoint == '\n') {
+      cursorX = x;
+      cursorY += kVoiceLineHeight;
+      continue;
+    }
+
+    const uint16_t glyphWidth = glyphWidth16(codepoint);
+    if (cursorX + glyphWidth > right) {
+      cursorX = x;
+      cursorY += kVoiceLineHeight;
+    }
+    if (cursorY + font16::kGlyphHeight > bottom) break;
+
+    if (drawCodepoint16(cursorX, cursorY, codepoint)) drewGlyph = true;
+    cursorX += glyphWidth;
+  }
+  return drewGlyph;
+}
+
+void drawVoiceDivider() {
+  for (uint16_t x = 0; x < kDisplayWidth; ++x) {
+    setPixel(x, kVoiceDividerY, true);
+  }
+}
+
+void clearVoiceRegion(uint8_t region) {
+  const uint16_t yStart = region * kVoiceRegionHeight;
+  const uint16_t yEnd = yStart + kVoiceRegionHeight;
+  for (uint16_t y = yStart; y < yEnd; ++y) {
+    for (uint16_t x = 0; x < kDisplayWidth; ++x) {
+      setPixel(x, y, false);
+    }
+  }
+  drawVoiceDivider();
+}
+
+void drawCompletionMarker(uint16_t x, uint16_t y, bool completed) {
+  for (uint16_t row = 0; row < kVoiceMarkerSize; ++row) {
+    for (uint16_t column = 0; column < kVoiceMarkerSize; ++column) {
+      const bool border = row < 2 || row >= kVoiceMarkerSize - 2 ||
+                          column < 2 || column >= kVoiceMarkerSize - 2;
+      setPixel(x + column, y + row, completed || border);
+    }
+  }
+}
+
+bool drawMarkerFreeRegion(uint8_t region, const char* text) {
+  if (region >= kVoiceRegionCount || text == nullptr || *text == '\0') {
+    return false;
+  }
+
+  clearVoiceRegion(region);
+  uint16_t textWidth = 0;
+  if (!measureText16(text, textWidth)) return false;
+  const uint16_t textX = (kDisplayWidth - textWidth) / 2;
+  const uint16_t textY = region * kVoiceRegionHeight +
+                         (kVoiceRegionHeight - font16::kGlyphHeight) / 2;
+
+  regionCompleted[region] = false;
+  regionHasResult[region] = false;
+  return drawText16(textX, textY, text);
+}
+
+bool drawInitialRegion(uint8_t region) {
+  const char* prompt = region == 0 ? u8"\u6309\u4F4F A1 \u8F93\u5165"
+                                   : u8"\u6309\u4F4F A2 \u8F93\u5165";
+  return drawMarkerFreeRegion(region, prompt);
+}
+
+bool drawInitialVoicePrompt() {
+  drawVoiceDivider();
+  return drawInitialRegion(0) && drawInitialRegion(1);
+}
+
+bool refreshVoiceDisplay() {
+  bool refreshed = false;
+  if (voiceFastRefreshes >= kFastRefreshesBeforeFull) {
+    refreshed = display.display(framebuffer);
+    if (refreshed) voiceFastRefreshes = 0;
+  } else {
+    refreshed = display.displayFast(framebuffer);
+    if (refreshed) ++voiceFastRefreshes;
+  }
+  return refreshed;
+}
+
+bool drawRecognitionRegion(uint8_t region, const char* text) {
+  clearVoiceRegion(region);
+  regionCompleted[region] = false;
+  regionHasResult[region] = true;
+  regionMarkerX[region] = kVoiceMarkerX;
+  const uint16_t textY =
+      region * kVoiceRegionHeight + kVoiceTextTopPadding;
+  regionMarkerY[region] =
+      textY + (font16::kGlyphHeight - kVoiceMarkerSize) / 2;
+  drawCompletionMarker(regionMarkerX[region], regionMarkerY[region], false);
+
+  const char* visibleText =
+      text != nullptr && *text != '\0'
+          ? text
+          : u8"\u672A\u8BC6\u522B\u5230\u8BED\u97F3";
+  return drawWrappedText16(kVoiceTextX, textY, kVoiceTextWidth,
+                           kVoiceTextHeight, visibleText);
+}
+
+void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
+                        const char* text) {
+  if (!voiceDisplayReady) {
+    Serial.println("ERROR: Display is not ready for region updates.");
+    return;
+  }
+  if (region >= kVoiceRegionCount) {
+    Serial.println("ERROR: Invalid display region.");
+    return;
+  }
+
+  switch (event) {
+    case voice_upload::RegionEvent::Recognition:
+      if (!drawRecognitionRegion(region, text)) {
+        Serial.println("ERROR: Recognition text could not be rendered.");
+        return;
+      }
+      break;
+    case voice_upload::RegionEvent::NoSpeech:
+      if (!drawMarkerFreeRegion(
+              region, u8"\u672A\u8BC6\u522B\u5230\u8BED\u97F3")) {
+        Serial.println("ERROR: No-speech prompt could not be rendered.");
+        return;
+      }
+      break;
+    case voice_upload::RegionEvent::ToggleCompletion:
+      if (!regionHasResult[region]) {
+        Serial.println("Region has no recognition result to toggle.");
+        return;
+      }
+      regionCompleted[region] = !regionCompleted[region];
+      drawCompletionMarker(regionMarkerX[region], regionMarkerY[region],
+                           regionCompleted[region]);
+      break;
+    case voice_upload::RegionEvent::Reset:
+      if (!drawInitialRegion(region)) {
+        Serial.println("ERROR: Initial region prompt could not be rendered.");
+        return;
+      }
+      break;
+    case voice_upload::RegionEvent::Error:
+      if (!drawMarkerFreeRegion(
+              region, u8"\u64CD\u4F5C\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5")) {
+        Serial.println("ERROR: Generic error prompt could not be rendered.");
+        return;
+      }
+      break;
+  }
+
+  const bool refreshed = refreshVoiceDisplay();
+  Serial.println(refreshed ? "Region update displayed."
+                           : "ERROR: Display refresh failed.");
+}
 
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("ZJY420S08W0G01 / SSD1683 startup");
+  delay(1500);
 
-  if (!display.begin()) return;
-  Serial.println("Displaying imported image...");
-  if (!display.display(kImageData)) return;
-  display.sleep();
-  Serial.println("Done. Display is asleep.");
+  voice_upload::setEventCallback(displayRegionEvent);
+  memset(framebuffer, 0xFF, sizeof(framebuffer));
+  if (!drawInitialVoicePrompt()) {
+    Serial.println("ERROR: Initial voice prompt could not be rendered.");
+  }
+  if (display.begin() && display.display(framebuffer)) {
+    voiceDisplayReady = true;
+    Serial.println("Voice display ready.");
+  } else {
+    Serial.println("ERROR: Voice display initialization failed.");
+  }
+  if (!voice_upload::begin()) {
+    Serial.println("Voice upload initialization failed.");
+  }
 }
 
-void loop() { delay(1000); }
+void loop() { voice_upload::poll(); }

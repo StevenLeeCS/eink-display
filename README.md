@@ -1,81 +1,146 @@
-# ZJY420S08W0G01 + XIAO ESP32-C3
+# 语音任务墨水屏
 
-这个工程让 Seeed Studio XIAO ESP32-C3 驱动中景园 ZJY420S08W0G01
-4.2 英寸黑白墨水屏。驱动 IC 是 SSD1683，分辨率为 400x300。
+基于 Seeed Studio XIAO ESP32-C3、INMP441 麦克风和中景园
+ZJY420S08W0G01 4.2 英寸黑白墨水屏。设备按住按键录音，将音频流上传到电脑，
+电脑使用 faster-whisper 识别中文，随后把结果返回设备并显示为任务。
 
-## 接线
+## 当前功能
 
-请以屏幕 PCB 上的丝印为准。模块必须使用 **3.3V**，不能接 5V。
+- 墨水屏按顺时针旋转后的 `300×400` 竖屏坐标显示。
+- 屏幕分为上下两个 `300×200` 区域，A1 控制上区，A2 控制下区。
+- 短按切换已有任务的未完成/已完成状态，分别显示空心/实心方块。
+- 按住至少 500ms 开始语音输入，松开后提交识别，最长 60 秒。
+- 保留按下后的 500ms 预录音频，避免丢失开头语音。
+- 静音按住 3 秒会立即重置对应区域，不需要等待松开。
+- 无语音和操作失败使用无方块的中文提示，技术错误仅写入串口。
+- 支持 GB2312 一级汉字以及可打印 ASCII 字符的 16 点阵显示。
+- 使用 SSD1683 双 RAM 全帧快刷，连续 4 次快刷后执行 1 次全刷。
+- 服务端识别完成后自动删除临时 WAV 文件。
 
-| 屏幕引脚 | XIAO 引脚 | ESP32-C3 GPIO | 说明 |
+当前刷新方式是“全帧数据传输 + 快速刷新波形”，不是仅传输局部 RAM 的物理局刷。
+这样可以保持两块 SSD1683 RAM 同步，避免多次更新后文字叠加或残缺。
+
+## 硬件接线
+
+所有模块使用 `3.3V` 并共地，不要连接 `5V`。
+
+### 墨水屏
+
+| ZJY420S08W0G01 | XIAO 引脚 | GPIO | 说明 |
 | --- | --- | ---: | --- |
 | VCC | 3V3 | - | 3.3V 电源 |
-| GND | GND | - | 两块板必须共地 |
-| DIN / SDA | D10 / MOSI | 10 | SPI 数据 |
-| CLK / SCL | D8 / SCK | 8 | SPI 时钟 |
-| CS | D1 | 3 | 片选，低有效 |
+| GND | GND | - | 公共地 |
+| DIN / SDA | D10 | 10 | SPI MOSI |
+| CLK / SCL | D8 | 8 | SPI SCK |
+| CS | D1 | 3 | SPI 片选 |
 | DC | D2 | 4 | 命令/数据选择 |
-| RST / RES | D3 | 5 | 复位，低有效 |
-| BUSY | D4 | 6 | 屏忙信号，高表示忙 |
+| RST / RES | D3 | 5 | 复位 |
+| BUSY | D4 | 6 | 高电平表示忙 |
 
-MISO 不需要连接。接线应尽量短，首次测试建议使用 USB 给 XIAO 供电。
+墨水屏的 MISO 不需要连接。面板按顺时针旋转 90° 使用，A1 位于上方，A2 位于
+下方。
 
-## 第一次点亮
+### INMP441
 
-1. 安装 VS Code、PlatformIO 插件，并用 VS Code 打开本目录。
-2. 按上表接好全部 8 根线，尤其检查 VCC 是 `3V3` 而不是 `5V`。
-3. 在 PlatformIO 中执行 `Upload`，然后打开 115200 波特率的串口监视器。
-4. 未转换图片时，屏幕会显示边框和棋盘测试图。刷新约需 3 秒，期间闪烁是正常现象。
+| INMP441 | XIAO 引脚 | GPIO | 说明 |
+| --- | --- | ---: | --- |
+| VDD | 3V3 | - | 3.3V 电源 |
+| GND | GND | - | 公共地 |
+| SCK / BCLK | D5 | 7 | I2S 位时钟 |
+| WS / LRCL | D6 | 21 | I2S 左右声道时钟 |
+| SD | D7 | 20 | I2S 数据输入 |
+| L/R | GND | - | 选择左声道 |
 
-也可以在终端中执行：
+### 按键
+
+| 按键 | XIAO 引脚 | GPIO | 控制区域 | 接法 |
+| --- | --- | ---: | --- | --- |
+| A1 | D0 | 2 | 上半区 | 按键连接 D0 与 GND |
+| A2 | D9 | 9 | 下半区 | 按键连接 D9 与 GND |
+
+按键使用 ESP32-C3 内部上拉，按下时为低电平，不需要外接上拉电阻。
+
+## 软件准备
+
+需要安装 VS Code、PlatformIO 扩展和 Python 3。首次使用时创建 Python 虚拟环境并
+安装识别服务依赖：
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+复制网络配置示例：
+
+```powershell
+Copy-Item include\network_config.example.h include\network_config.h
+```
+
+编辑 `include/network_config.h`：
+
+- `kWifiSsid` 和 `kWifiPassword`：ESP32 使用的 2.4GHz Wi-Fi。
+- `kServerHost`：运行识别服务的电脑局域网 IPv4 地址，不能使用 `localhost`。
+- `kServerPort`：默认 `18000`。
+
+真实配置文件已被 Git 忽略，不会上传 Wi-Fi 密码。
+
+## 运行流程
+
+1. 启动电脑端接收和识别服务：
+
+```powershell
+.\.venv\Scripts\python.exe tools\audio_receiver.py
+```
+
+2. 编译并烧录设备：
+
+```powershell
+pio run
 pio run -t upload
+```
+
+3. 根据需要打开串口监视器：
+
+```powershell
 pio device monitor -b 115200
 ```
 
-## 显示自己的图片
+4. 按住 A1 或 A2 并说话，松开后等待识别和屏幕刷新。短按已有任务对应的按键可以
+   切换完成状态。
 
-先安装图片转换依赖：
+服务端通过 HTTP chunked encoding 边接收边写入临时 WAV。识别完成、识别失败或
+设备判定本段为静音时都会删除临时文件，因此 `recordings` 目录通常为空。
+
+## 字库与显示
+
+- `assets/gb2312_level1_16.bin`：GB2312 一级汉字，3755 个字符。
+- `assets/gb2312_level1_unicode_map.bin`：Unicode 到字库位置的映射。
+- `assets/asc16_printable.bin`：英文、数字和可打印标点。
+- 不在字库中的字符显示为 `?`。
+
+字库二进制通过 `platformio.ini` 嵌入固件。它们是文字显示所需资源，不属于已删除的
+通用图片显示功能。
+
+## 验证
 
 ```powershell
-python -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m py_compile tools\audio_receiver.py tools\test_audio_receiver.py
+.\.venv\Scripts\python.exe tools\test_audio_receiver.py
+pio run
+git diff --check
 ```
-
-把图片转换为 400x300、1 bit 的固件数组：
-
-```powershell
-python tools/image_to_header.py path\to\photo.jpg
-```
-
-脚本会覆盖 `include/image_data.h`，同时生成
-`include/image_data.preview.png` 供检查。默认完整保留图片并添加白边，使用
-Floyd-Steinberg 抖动表现灰度。常用选项：
-
-```powershell
-# 裁切铺满屏幕
-python tools/image_to_header.py photo.jpg --fit cover
-
-# 不抖动，按固定阈值转黑白
-python tools/image_to_header.py logo.png --threshold 150
-
-# 顺时针旋转 90 度
-python tools/image_to_header.py photo.jpg --rotate 90
-```
-
-转换后重新执行 `Upload`。固件在刷新完成后会让屏幕进入深度睡眠；墨水屏断电后
-仍会保留图像。要换图需重新复位或上电。
 
 ## 故障排查
 
-- 串口显示 `BUSY timeout`：先检查 `BUSY`、`RST`、3.3V 和 GND，确认没有把
-  VCC 接到 5V。
-- 屏幕完全不刷新：检查 `DIN` 是否接 D10、`CLK` 是否接 D8，以及 CS/DC 是否
-  接反。
-- 图像黑白颠倒：转换时加 `--invert`。
-- 图像方向不对：转换时用 `--rotate 90`、`180` 或 `270`。
-- 刷新时屏幕闪黑/闪白：这是全刷波形的正常过程，不要在 BUSY 为高时断电。
-- 不要快速循环全刷。电子纸适合低频更新，当前示例只在启动时刷新一次。
+- 串口没有输出：关闭并重新打开监视器，重新插拔 USB 后按一次 XIAO Reset。
+- 上传时串口被占用：先用 `Ctrl+C` 关闭监视器，再执行上传。
+- `BUSY timeout`：检查墨水屏的 3.3V、GND、BUSY 和 RST。
+- Wi-Fi 超时：检查网络配置、2.4GHz Wi-Fi 频段和信号。
+- 无法连接服务端：确认电脑与设备位于同一局域网、防火墙允许配置端口，并检查电脑
+  当前 IPv4 地址。
+- 服务端端口无权限或被占用：使用 `--port` 更换端口，并同步修改设备配置。
+- 旧文字叠加或刷新异常：确认固件会同时写入 SSD1683 的 `0x24` 和 `0x26` RAM。
+- 静音长按没有自动重置：检查串口中的录音秒数，并根据现场底噪调整 VAD 阈值。
 
-初始化和刷新命令按 `docs` 中厂家 STM32 示例移植：软复位 `0x12`、黑白 RAM
-`0x24`、第二 RAM `0x26`、显示控制 `0x22=0xF7`、启动刷新 `0x20`。
+硬件规格书和厂商示例位于 `docs`，当前架构说明见 `AGENTS.md`，每日开发记录见
+`DEVELOPMENT_LOG.md`。
