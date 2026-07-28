@@ -483,6 +483,12 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         return;
       }
       break;
+    case voice_upload::RegionEvent::Status:
+      if (!drawMarkerFreeRegion(region, text)) {
+        Serial.println("ERROR: Status text could not be rendered.");
+        return;
+      }
+      break;
     case voice_upload::RegionEvent::Error:
       if (!drawMarkerFreeRegion(
               region, u8"\u64CD\u4F5C\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5")) {

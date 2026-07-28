@@ -7,15 +7,17 @@
 
 #include "inmp441_audio.h"
 #include "network_config.h"
+#include "task_processing.h"
+#include "wifi_provisioning.h"
 
 namespace voice_upload {
 namespace {
 
 constexpr uint32_t kMaxRecordingSeconds = 60;
-constexpr uint32_t kWifiTimeoutMs = 20000;
 constexpr uint32_t kWriteTimeoutMs = 5000;
 constexpr uint32_t kButtonDebounceMs = 40;
 constexpr uint32_t kShortPressMs = 500;
+constexpr uint32_t kProvisioningGestureMs = 2000;
 constexpr uint32_t kResetRecordingSeconds = 3;
 constexpr int32_t kSpeechRmsThreshold = 300;
 constexpr uint32_t kVadIgnoreMs = 300;
@@ -45,6 +47,7 @@ struct ButtonState {
 int16_t pcmBuffer[inmp441_audio::kMaxSamplesPerRead];
 int16_t preRollBuffer[kPreRollSamples];
 ButtonState buttonStates[kRegionCount] = {};
+uint32_t bothButtonsPressedAt = 0;
 bool initialized = false;
 EventCallback eventCallback = nullptr;
 
@@ -54,33 +57,19 @@ void emitRegionEvent(uint8_t region, RegionEvent event,
 }
 
 bool configurationIsReady() {
-  return strcmp(voice_config::kWifiSsid, "YOUR_WIFI_SSID") != 0 &&
-         voice_config::kServerHost[0] != '\0';
+  return voice_config::kServerHost[0] != '\0';
 }
 
 bool connectWifi() {
-  if (WiFi.status() == WL_CONNECTED) return true;
+  return wifi_provisioning::reconnect();
+}
 
-  Serial.printf("Connecting to Wi-Fi: %s", voice_config::kWifiSsid);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(voice_config::kWifiSsid, voice_config::kWifiPassword);
-
-  const uint32_t started = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - started < kWifiTimeoutMs) {
-    Serial.print('.');
-    delay(500);
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("ERROR: Wi-Fi connection timed out.");
-    return false;
-  }
-
-  Serial.print("Wi-Fi connected, device IP: ");
-  Serial.println(WiFi.localIP());
-  return true;
+void showProvisioningStatus() {
+  emitRegionEvent(0, RegionEvent::Status, wifi_provisioning::kSetupApSsid);
+  char passwordPrompt[32];
+  snprintf(passwordPrompt, sizeof(passwordPrompt), "Pass: %s",
+           wifi_provisioning::kSetupApPassword);
+  emitRegionEvent(1, RegionEvent::Status, passwordPrompt);
 }
 
 bool writeAll(WiFiClient& client, const uint8_t* data, size_t size) {
@@ -219,6 +208,11 @@ void handleButtonPress(uint8_t region, int buttonPin) {
   uint32_t releaseStartedAt = 0;
   const uint32_t pressedAt = millis();
   while (millis() - pressedAt < kShortPressMs) {
+    if (digitalRead(kButtonPins[1U - region]) == LOW) {
+      bothButtonsPressedAt = millis();
+      Serial.println("A1+A2 chord detected; keep holding to open Wi-Fi setup.");
+      return;
+    }
     if (buttonWasReleased(buttonPin, releaseStartedAt)) {
       Serial.printf("Region %u short press: toggle completion.\n",
                     static_cast<unsigned>(region + 1));
@@ -364,8 +358,11 @@ void handleButtonPress(uint8_t region, int buttonPin) {
     } else if (!speechDetected) {
       emitRegionEvent(region, RegionEvent::NoSpeech);
     } else {
+      const task_processing::TaskRecord task =
+          task_processing::fromRecognition(recognizedText);
+      const String displayText = task_processing::textForDisplay(task);
       emitRegionEvent(region, RegionEvent::Recognition,
-                      recognizedText.c_str());
+                      displayText.c_str());
     }
     Serial.println("Press and hold a region button to record again.");
   } else {
@@ -380,14 +377,21 @@ void handleButtonPress(uint8_t region, int buttonPin) {
 void setEventCallback(EventCallback callback) { eventCallback = callback; }
 
 bool begin() {
-  if (!configurationIsReady()) {
-    Serial.println("ERROR: Edit include/network_config.h before uploading.");
-    return false;
-  }
-  if (!inmp441_audio::begin() || !connectWifi()) return false;
-
   for (uint8_t region = 0; region < kRegionCount; ++region) {
     pinMode(kButtonPins[region], INPUT_PULLUP);
+  }
+
+  if (!wifi_provisioning::begin(false, showProvisioningStatus)) {
+    return false;
+  }
+  if (!configurationIsReady()) {
+    Serial.println(
+        "ERROR: Configure the receiver in include/network_config.h before uploading.");
+    return false;
+  }
+  if (!inmp441_audio::begin()) return false;
+
+  for (uint8_t region = 0; region < kRegionCount; ++region) {
     const bool pressed = digitalRead(kButtonPins[region]) == LOW;
     buttonStates[region] = {pressed, pressed, millis()};
   }
@@ -401,6 +405,26 @@ void poll() {
   if (!initialized) {
     delay(1000);
     return;
+  }
+
+  const bool bothButtonsPressed =
+      digitalRead(kButtonPins[0]) == LOW &&
+      digitalRead(kButtonPins[1]) == LOW;
+  if (bothButtonsPressed) {
+    if (bothButtonsPressedAt == 0) bothButtonsPressedAt = millis();
+    if (millis() - bothButtonsPressedAt >= kProvisioningGestureMs) {
+      Serial.println("A1+A2 held for two seconds; opening Wi-Fi setup.");
+      wifi_provisioning::begin(true, showProvisioningStatus);
+    }
+    delay(5);
+    return;
+  }
+  if (bothButtonsPressedAt != 0) {
+    bothButtonsPressedAt = 0;
+    for (uint8_t region = 0; region < kRegionCount; ++region) {
+      const bool pressed = digitalRead(kButtonPins[region]) == LOW;
+      buttonStates[region] = {pressed, pressed, millis()};
+    }
   }
 
   for (uint8_t region = 0; region < kRegionCount; ++region) {

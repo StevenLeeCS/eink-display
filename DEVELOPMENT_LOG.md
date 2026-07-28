@@ -11,11 +11,20 @@ Update `README.md` only when explicitly requested.
   full-window black/white differential refresh and synchronized `0x24/0x26`.
 - Verified stable A1/A2 visual region updates on the physical display without
   cross-region resets, old-content migration or half-screen inversion.
+- Defined the three-major-stage product roadmap and code reuse boundaries.
+- Added an ESP-hosted phone Wi-Fi portal with network scanning, credential
+  verification, project-specific NVS storage and automatic reconnect.
+- Added an A1+A2 two-second recovery gesture for changing Wi-Fi and verified
+  the setup access point and phone provisioning flow on hardware.
+- Added a disabled task-processing boundary; recognition text still passes
+  through unchanged, with Baidu STT and DeepSeek integration deferred.
 
 ### Current state
 
 - Region rendering is software-local, while each differential update transfers
   the full 400x300 frame; native SSD1683 sub-windows remain unsupported.
+- Wi-Fi no longer comes from `network_config.h`; that file currently retains
+  only the temporary PC audio-receiver address.
 
 ## 2026-07-27
 

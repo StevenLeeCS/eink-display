@@ -9,6 +9,7 @@ enum class RegionEvent : uint8_t {
   NoSpeech,
   ToggleCompletion,
   Reset,
+  Status,
   Error,
 };
 
