@@ -3,6 +3,20 @@
 Daily handoff notes for developers and AI agents. Add new dates at the top.
 Update `README.md` only when explicitly requested.
 
+## 2026-07-28
+
+### Completed
+
+- Replaced unstable native half-window updates with the vendor-validated
+  full-window black/white differential refresh and synchronized `0x24/0x26`.
+- Verified stable A1/A2 visual region updates on the physical display without
+  cross-region resets, old-content migration or half-screen inversion.
+
+### Current state
+
+- Region rendering is software-local, while each differential update transfers
+  the full 400x300 frame; native SSD1683 sub-windows remain unsupported.
+
 ## 2026-07-27
 
 ### Completed
@@ -25,6 +39,8 @@ Update `README.md` only when explicitly requested.
 - Removed the obsolete image pipeline and standalone display/microphone demos;
   added `AGENTS.md` as the AI project handoff entry point.
 - Rotated the UI to a 300x400 portrait coordinate system with A1 above A2.
+- Switched to the vendor SSD1683 black/white differential refresh; UI events
+  only alter the selected half while the controller uses a full RAM window.
 - Finalized the current release documentation and removed the obsolete Pillow
   dependency before publishing the voice-task version.
 

@@ -41,7 +41,7 @@ constexpr uint16_t kVoiceTextWidth = kDisplayWidth - kVoiceTextX - 16;
 constexpr uint16_t kVoiceTextHeight =
     kVoiceRegionHeight - 2 * kVoiceTextTopPadding;
 constexpr uint16_t kVoiceLineHeight = 20;
-constexpr uint8_t kFastRefreshesBeforeFull = 4;
+constexpr uint8_t kPartialRefreshesBeforeFull = 4;
 
 class Epd42 {
  public:
@@ -80,32 +80,32 @@ class Epd42 {
     commandWithData(0x3C, 0x05);
 
     writeFrame(0x24, image);  // Black/white RAM.
-    writeFrame(0x26, image);  // Keep the second RAM synchronized.
+    writeFrame(0x26, image);  // Baseline for the next black/white update.
 
     commandWithData(0x22, 0xF7);  // Load OTP LUT and perform full update.
     command(0x20);                // MASTER_ACTIVATION
     return waitUntilIdle("display update");
   }
 
-  bool displayFast(const uint8_t* framebuffer) {
-    if (framebuffer == nullptr) return false;
+  bool displayPartial(const uint8_t* image) {
+    if (image == nullptr) return false;
 
-    const uint8_t updateControl[] = {0x40, 0x00};
+    const uint8_t updateControl[] = {0x00, 0x00};
     command(0x21);
     data(updateControl, sizeof(updateControl));
-    commandWithData(0x3C, 0x05);
+    commandWithData(0x3C, 0x80);  // Vendor partial-update border setting.
 
-    commandWithData(0x1A, 0x6E);  // Vendor 1.5-second fast waveform.
-    commandWithData(0x22, 0x91);  // Load the fast waveform from OTP.
+    // The vendor demo only validates the black/white partial waveform with a
+    // full RAM window. Unchanged pixels have identical old and new RAM bits.
+    writeFrame(0x24, image);
+
+    commandWithData(0x22, 0xFF);  // Load and run the black/white LUT.
     command(0x20);
-    if (!waitUntilIdle("fast waveform setup")) return false;
+    if (!waitUntilIdle("partial display update")) return false;
 
-    writeFrame(0x24, framebuffer);
-    writeFrame(0x26, framebuffer);
-
-    commandWithData(0x22, 0xC7);  // Perform the vendor fast update.
-    command(0x20);
-    return waitUntilIdle("fast display update");
+    // The black/white LUT uses RAM 0x26 as the previous pixel state.
+    writeFrame(0x26, image);
+    return true;
   }
 
  private:
@@ -190,7 +190,7 @@ class Epd42 {
 Epd42 display;
 uint8_t framebuffer[kFrameBytes];
 bool voiceDisplayReady = false;
-uint8_t voiceFastRefreshes = 0;
+uint8_t voicePartialRefreshes = 0;
 bool regionCompleted[kVoiceRegionCount] = {false, false};
 bool regionHasResult[kVoiceRegionCount] = {false, false};
 uint16_t regionMarkerX[kVoiceRegionCount] = {};
@@ -408,15 +408,19 @@ bool drawInitialVoicePrompt() {
   return drawInitialRegion(0) && drawInitialRegion(1);
 }
 
-bool refreshVoiceDisplay() {
-  bool refreshed = false;
-  if (voiceFastRefreshes >= kFastRefreshesBeforeFull) {
-    refreshed = display.display(framebuffer);
-    if (refreshed) voiceFastRefreshes = 0;
-  } else {
-    refreshed = display.displayFast(framebuffer);
-    if (refreshed) ++voiceFastRefreshes;
+bool refreshVoiceRegion(uint8_t region) {
+  if (region >= kVoiceRegionCount) return false;
+
+  if (voicePartialRefreshes >= kPartialRefreshesBeforeFull) {
+    Serial.println("Performing periodic full refresh.");
+    const bool refreshed = display.display(framebuffer);
+    if (refreshed) voicePartialRefreshes = 0;
+    return refreshed;
   }
+
+  Serial.printf("Differential refresh for logical region %u.\n", region + 1);
+  const bool refreshed = display.displayPartial(framebuffer);
+  if (refreshed) ++voicePartialRefreshes;
   return refreshed;
 }
 
@@ -488,7 +492,7 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
       break;
   }
 
-  const bool refreshed = refreshVoiceDisplay();
+  const bool refreshed = refreshVoiceRegion(region);
   Serial.println(refreshed ? "Region update displayed."
                            : "ERROR: Display refresh failed.");
 }
@@ -504,9 +508,10 @@ void setup() {
   if (!drawInitialVoicePrompt()) {
     Serial.println("ERROR: Initial voice prompt could not be rendered.");
   }
-  if (display.begin() && display.display(framebuffer)) {
+  const bool displayInitialized = display.begin() && display.display(framebuffer);
+  if (displayInitialized) {
     voiceDisplayReady = true;
-    Serial.println("Voice display ready.");
+    Serial.println("Voice display ready with synchronized partial-refresh RAM.");
   } else {
     Serial.println("ERROR: Voice display initialization failed.");
   }
