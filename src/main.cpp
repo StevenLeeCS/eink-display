@@ -468,6 +468,17 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         return;
       }
       break;
+    case voice_upload::RegionEvent::NotTask:
+      if (regionHasResult[region]) {
+        Serial.println("Non-task speech ignored; existing region preserved.");
+        return;
+      }
+      if (!drawMarkerFreeRegion(
+              region, u8"\u672A\u8BC6\u522B\u5230\u5F85\u529E\u4E8B\u9879")) {
+        Serial.println("ERROR: Non-task prompt could not be rendered.");
+        return;
+      }
+      break;
     case voice_upload::RegionEvent::ToggleCompletion:
       if (!regionHasResult[region]) {
         Serial.println("Region has no recognition result to toggle.");

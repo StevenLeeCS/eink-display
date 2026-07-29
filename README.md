@@ -2,7 +2,8 @@
 
 基于 Seeed Studio XIAO ESP32-C3、INMP441 麦克风和中景园
 ZJY420S08W0G01 4.2 英寸黑白墨水屏。设备按住按键录音，将音频流上传到电脑，
-电脑使用 faster-whisper 识别中文，随后把结果返回设备并显示为任务。
+Python 网关可使用百度语音或本地 faster-whisper 识别中文，并可调用 DeepSeek 按
+时间、地点、人物、事情整理后返回设备显示。
 
 当前远程仓库中的版本是已完成的阶段 0 基线。后续开发将在新分支进行，并逐步把依赖
 电脑的识别链替换为设备直连云端的产品流程。
@@ -20,6 +21,11 @@ ZJY420S08W0G01 4.2 英寸黑白墨水屏。设备按住按键录音，将音频�
 - 使用 SSD1683 `0x24/0x26` 双 RAM 黑白差分刷新，连续 4 次差分刷新后执行
   1 次全刷。
 - 服务端识别完成后自动删除临时 WAV 文件。
+- 首次使用通过手机连接设备配网页面，Wi-Fi 凭据验证后保存在 NVS；正常运行时同时
+  长按 A1+A2 两秒可切换网络。
+- 百度 STT 与 DeepSeek 密钥通过本地 `tools/cloud_config.env` 配置，不写入仓库。
+- DeepSeek 判定输入不是待办时，空区域显示无方块提示；已有任务区域保持原内容和
+  完成状态。
 
 当前使用厂商 `0xFF` 黑白差分刷新波形和完整 `400×300` RAM 窗口。A1/A2
 只修改软件 framebuffer 中对应的半区，但每次仍传输完整新旧帧，因此这是视觉上的
@@ -84,11 +90,21 @@ Copy-Item include\network_config.example.h include\network_config.h
 
 编辑 `include/network_config.h`：
 
-- `kWifiSsid` 和 `kWifiPassword`：ESP32 使用的 2.4GHz Wi-Fi。
 - `kServerHost`：运行识别服务的电脑局域网 IPv4 地址，不能使用 `localhost`。
 - `kServerPort`：默认 `18000`。
 
-真实配置文件已被 Git 忽略，不会上传 Wi-Fi 密码。
+Wi-Fi 名称和密码不再写入该文件，而是通过设备配网页面录入。真实接收器配置已被
+Git 忽略。
+
+启用百度 STT 和 DeepSeek：
+
+```powershell
+Copy-Item tools\cloud_config.example.env tools\cloud_config.env
+```
+
+编辑 `tools/cloud_config.env`，填写 `BAIDU_API_KEY`、`BAIDU_SECRET_KEY` 和
+`DEEPSEEK_API_KEY`。保持 `STT_PROVIDER=baidu`；只测试百度识别时可将
+`ENABLE_DEEPSEEK` 改为 `false`。真实密钥文件已被 Git 忽略。
 
 ## 运行流程
 
@@ -114,8 +130,14 @@ pio device monitor -b 115200
 4. 按住 A1 或 A2 并说话，松开后等待识别和屏幕刷新。短按已有任务对应的按键可以
    切换完成状态。
 
-服务端通过 HTTP chunked encoding 边接收边写入临时 WAV。识别完成、识别失败或
-设备判定本段为静音时都会删除临时文件，因此 `recordings` 目录通常为空。
+服务端通过 HTTP chunked encoding 边接收边写入临时 WAV。录音结束后调用所选 STT，
+再按配置调用 DeepSeek；完成后将显示文本和语音/待办判定响应头返回设备。识别完成、
+识别失败或设备判定本段为静音时都会删除临时文件，因此 `recordings` 目录通常为空。
+HTTP 收发位于 `audio_receiver.py`，STT 选择、任务结构化与文本兜底集中在
+`recognition_pipeline.py`，百度和 DeepSeek 的协议适配位于 `cloud_services.py`。
+
+当前云 API 通过 Python 网关接入，ESP32 仍连接 `kServerHost`，尚未实现设备直接连接
+百度或 DeepSeek。这样可以保留现有流式上传并避免在 ESP32-C3 内存中保存完整录音。
 
 ## 字库与显示
 
@@ -181,8 +203,9 @@ pio device monitor -b 115200
 ## 验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile tools\audio_receiver.py tools\test_audio_receiver.py
+.\.venv\Scripts\python.exe -m py_compile tools\audio_receiver.py tools\cloud_services.py tools\recognition_pipeline.py tools\test_audio_receiver.py tools\test_cloud_services.py
 .\.venv\Scripts\python.exe tools\test_audio_receiver.py
+.\.venv\Scripts\python.exe tools\test_cloud_services.py
 pio run
 git diff --check
 ```
@@ -195,6 +218,9 @@ git diff --check
 - Wi-Fi 超时：检查网络配置、2.4GHz Wi-Fi 频段和信号。
 - 无法连接服务端：确认电脑与设备位于同一局域网、防火墙允许配置端口，并检查电脑
   当前 IPv4 地址。
+- 百度配置错误：检查 `STT_PROVIDER`、API Key、Secret Key 和百度应用的语音识别权限。
+- DeepSeek 失败：服务端会记录具体原因并回退到原始转写，不会把技术错误显示在屏幕。
+- 修改 Python 服务端后仍出现旧错误：用 `Ctrl+C` 停止旧进程并重新启动服务。
 - 服务端端口无权限或被占用：使用 `--port` 更换端口，并同步修改设备配置。
 - 旧文字叠加或刷新异常：确认 `0x24` 保存新帧，刷新后将完整新帧同步到 `0x26`，
   并使用完整 `400×300` RAM 窗口。

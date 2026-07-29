@@ -3,6 +3,31 @@
 Daily handoff notes for developers and AI agents. Add new dates at the top.
 Update `README.md` only when explicitly requested.
 
+## 2026-07-29
+
+### Completed
+
+- Added standard-library Baidu STT and DeepSeek adapters behind the existing
+  streaming audio receiver.
+- Added bounded `time/place/person/event` JSON parsing and ordered e-paper text
+  formatting with transcript fallback.
+- Added `tools/cloud_config.example.env`; real API keys remain local and ignored.
+- Added offline request-contract tests for Baidu OAuth/STT and DeepSeek; real
+  provider calls remain pending user API configuration.
+- Fixed the receiver/DeepSeek client method contract and added an integration
+  regression test for structured display output.
+- Added explicit non-task classification: empty regions show a marker-free
+  prompt, while existing task content and completion state are preserved.
+- Split provider orchestration from the HTTP receiver, retained transcript text
+  when structured fields are incomplete, and added Baidu token expiry refresh.
+
+### Current state
+
+- Set `STT_PROVIDER=baidu` and fill Baidu keys to replace faster-whisper; set
+  `ENABLE_DEEPSEEK=true` and fill the DeepSeek key to enable task structuring.
+- ESP32 audio streaming requests remain unchanged; the response protocol and
+  display events now include an explicit non-task state.
+
 ## 2026-07-28
 
 ### Completed

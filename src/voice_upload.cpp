@@ -152,7 +152,7 @@ void updateSpeechDetection(const int16_t* samples, size_t count,
 }
 
 bool readHttpResponse(WiFiClient& client, String& responseBody,
-                      bool& speechDetected) {
+                      bool& speechDetected, bool& taskDetected) {
   client.setTimeout(60000);
   const String statusLine = client.readStringUntil('\n');
   Serial.print("Server response: ");
@@ -169,6 +169,8 @@ bool readHttpResponse(WiFiClient& client, String& responseBody,
       contentLength = header.substring(15).toInt();
     } else if (header.startsWith("X-Speech-Detected:")) {
       speechDetected = header.substring(18).toInt() == 1;
+    } else if (header.startsWith("X-Task-Detected:")) {
+      taskDetected = header.substring(16).toInt() == 1;
     }
   }
 
@@ -342,8 +344,9 @@ void handleButtonPress(uint8_t region, int buttonPin) {
   String recognizedText;
   // A missing header from an older receiver must never clear display content.
   bool speechDetected = true;
+  bool taskDetected = true;
   const bool success =
-      readHttpResponse(client, recognizedText, speechDetected);
+      readHttpResponse(client, recognizedText, speechDetected, taskDetected);
   client.stop();
   if (success) {
     Serial.println("Recognition result:");
@@ -357,6 +360,8 @@ void handleButtonPress(uint8_t region, int buttonPin) {
       emitRegionEvent(region, RegionEvent::Reset);
     } else if (!speechDetected) {
       emitRegionEvent(region, RegionEvent::NoSpeech);
+    } else if (!taskDetected) {
+      emitRegionEvent(region, RegionEvent::NotTask);
     } else {
       const task_processing::TaskRecord task =
           task_processing::fromRecognition(recognizedText);

@@ -7,6 +7,7 @@ namespace voice_upload {
 enum class RegionEvent : uint8_t {
   Recognition,
   NoSpeech,
+  NotTask,
   ToggleCompletion,
   Reset,
   Status,

@@ -37,6 +37,13 @@ temporary PC recognition path incrementally.
   200 ms of sustained activity. A silent three-second hold immediately resets
   that region without waiting for release.
 - Successful recognition replaces the selected region and starts incomplete.
+- First use opens an ESP-hosted phone provisioning portal; credentials are
+  verified and stored in project-specific NVS. Holding A1+A2 for two seconds
+  re-enters provisioning.
+- The receiver can use local faster-whisper or Baidu STT, then optionally ask
+  DeepSeek for bounded `time/place/person/event` task fields.
+- Non-task speech shows a marker-free prompt in an empty region. If the region
+  already contains a task, its text and completion state are preserved.
 - No-speech and generic retry prompts have no marker. Technical errors remain
   in the serial log.
 - Display updates write both SSD1683 RAM planes. Four fast refreshes are
@@ -52,15 +59,24 @@ temporary PC recognition path incrementally.
 - `src/ascii_font_16.cpp`, `src/chinese_font_16.cpp`: access embedded font data.
 - `assets/`: required ASCII and GB2312 level-1 font binaries. These are not
   general display images and must remain embedded by `platformio.ini`.
-- `tools/audio_receiver.py`: temporary WAV receiver and faster-whisper service.
+- `tools/audio_receiver.py`: streaming WAV upload and HTTP response gateway.
+- `tools/recognition_pipeline.py`: provider selection, STT, DeepSeek fallback
+  and display-text normalization.
 - `tools/test_audio_receiver.py`: receiver and chunked-transfer tests.
+- `tools/cloud_services.py`: Baidu STT and DeepSeek adapters used by the
+  receiver; provider keys are supplied through the ignored env file.
+- `tools/cloud_config.example.env`: blank cloud-provider configuration template.
+- `tools/test_cloud_services.py`: offline provider-contract and task parsing
+  tests; no real API calls.
 - `DEVELOPMENT_LOG.md`: concise chronological implementation record.
 
 ## Local Configuration
 
 Copy `include/network_config.example.h` to `include/network_config.h` and set the
-Wi-Fi credentials plus receiver address. The real config is ignored by Git and
-must not be committed.
+temporary audio-receiver address. Wi-Fi credentials are entered through the
+device portal and stored in NVS. To enable cloud recognition, copy
+`tools/cloud_config.example.env` to `tools/cloud_config.env`, fill the provider
+keys, and set `STT_PROVIDER=baidu`; the real env file is ignored by Git.
 
 ## Target Product Flow
 
@@ -177,8 +193,9 @@ interfaces.
 ## Verification
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile tools\audio_receiver.py tools\test_audio_receiver.py
+.\.venv\Scripts\python.exe -m py_compile tools\audio_receiver.py tools\cloud_services.py tools\recognition_pipeline.py tools\test_audio_receiver.py tools\test_cloud_services.py
 .\.venv\Scripts\python.exe tools\test_audio_receiver.py
+.\.venv\Scripts\python.exe tools\test_cloud_services.py
 pio run
 git diff --check
 ```

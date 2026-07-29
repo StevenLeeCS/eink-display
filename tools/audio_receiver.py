@@ -6,19 +6,32 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
 from pathlib import Path
-import threading
 from typing import BinaryIO, Callable
 import wave
 
 try:
     from faster_whisper import WhisperModel
+except ModuleNotFoundError:
+    WhisperModel = None  # type: ignore[assignment,misc]
+
+try:
     from opencc import OpenCC
 except ModuleNotFoundError as error:
     raise SystemExit(
-        "faster-whisper is not installed. Run: "
+        "opencc is not installed. Run: "
         r".\.venv\Scripts\python.exe -m pip install -r requirements.txt"
     ) from error
+
+from cloud_services import (
+    BaiduConfig,
+    BaiduSpeechClient,
+    CloudServiceError,
+    DeepSeekConfig,
+    DeepSeekClient,
+)
+from recognition_pipeline import RecognitionPipeline
 
 
 MAX_RECORDING_SECONDS = 60
@@ -36,6 +49,10 @@ class AudioTooLargeError(AudioUploadError):
 
 def speech_detection_header(speech_detected: bool) -> str:
     return "1" if speech_detected else "0"
+
+
+def task_detection_header(task_detected: bool) -> str:
+    return "1" if task_detected else "0"
 
 
 def _read_exact(stream: BinaryIO, size: int) -> bytes:
@@ -87,10 +104,7 @@ def copy_chunked_audio(
 class AudioReceiverServer(ThreadingHTTPServer):
     daemon_threads = True
     output_dir: Path
-    transcriber: WhisperModel
-    transcribe_lock: threading.Lock
-    language: str
-    converter: OpenCC
+    recognition_pipeline: RecognitionPipeline
 
 
 class AudioReceiverHandler(BaseHTTPRequestHandler):
@@ -180,21 +194,21 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.send_header("X-Speech-Detected", "0")
+            self.send_header("X-Task-Detected", "0")
             self.end_headers()
             return
 
         print(f"Saved {final_path} ({received_bytes} PCM bytes)", flush=True)
-        print("Recognizing speech...", flush=True)
+        print(
+            "Recognizing speech with "
+            f"{server.recognition_pipeline.stt_provider}...",
+            flush=True,
+        )
         try:
-            with server.transcribe_lock:
-                segments, _ = server.transcriber.transcribe(
-                    str(final_path),
-                    language=server.language,
-                    beam_size=5,
-                    vad_filter=True,
-                    condition_on_previous_text=False,
-                )
-                recognized_text = "".join(segment.text for segment in segments).strip()
+            result = server.recognition_pipeline.recognize(final_path)
+        except CloudServiceError as error:
+            self.send_error(500, f"Speech recognition failed: {error}")
+            return
         except Exception as error:  # The client needs a clear HTTP failure.
             self.send_error(500, f"Speech recognition failed: {error}")
             return
@@ -208,37 +222,17 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
                     flush=True,
                 )
 
-        speech_detected = bool(recognized_text)
-        if speech_detected:
-            recognized_text = server.converter.convert(recognized_text)
-            recognized_text = recognized_text.translate(
-                str.maketrans(
-                    {
-                        "，": ",",
-                        "。": ".",
-                        "！": "!",
-                        "？": "?",
-                        "：": ":",
-                        "；": ";",
-                        "（": "(",
-                        "）": ")",
-                        "“": '"',
-                        "”": '"',
-                        "‘": "'",
-                        "’": "'",
-                    }
-                )
-            )
-        else:
-            recognized_text = "\u672a\u8bc6\u522b\u5230\u8bed\u97f3"
-        print(f"Recognized: {recognized_text}", flush=True)
+        print(f"Recognized: {result.text}", flush=True)
 
-        body = recognized_text.encode("utf-8")
+        body = result.text.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header(
-            "X-Speech-Detected", speech_detection_header(speech_detected)
+            "X-Speech-Detected", speech_detection_header(result.speech_detected)
+        )
+        self.send_header(
+            "X-Task-Detected", task_detection_header(result.task_detected)
         )
         self.end_headers()
         self.wfile.write(body)
@@ -258,27 +252,87 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--compute-type", default="int8")
     parser.add_argument("--language", default="zh")
+    parser.add_argument(
+        "--cloud-config",
+        type=Path,
+        default=Path("tools/cloud_config.env"),
+        help="optional KEY=VALUE cloud API configuration file",
+    )
     return parser.parse_args()
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key:
+            os.environ.setdefault(key, value)
 
 
 def main() -> None:
     args = parse_args()
+    load_env_file(args.cloud_config)
     args.output.mkdir(parents=True, exist_ok=True)
-    print(
-        f"Loading Whisper model {args.model} "
-        f"({args.device}/{args.compute_type})...",
-        flush=True,
-    )
-    transcriber = WhisperModel(
-        args.model, device=args.device, compute_type=args.compute_type
-    )
+    stt_provider = os.environ.get("STT_PROVIDER", "local").strip().lower()
+    if stt_provider not in {"local", "baidu"}:
+        raise SystemExit("STT_PROVIDER must be 'local' or 'baidu'")
+
+    transcriber: WhisperModel | None = None
+    baidu_client: BaiduSpeechClient | None = None
+    if stt_provider == "baidu":
+        if not os.environ.get("BAIDU_API_KEY", "").strip() or not os.environ.get(
+            "BAIDU_SECRET_KEY", ""
+        ).strip():
+            raise SystemExit(
+                "Fill BAIDU_API_KEY and BAIDU_SECRET_KEY in tools/cloud_config.env"
+            )
+        baidu_client = BaiduSpeechClient(BaiduConfig.from_env())
+    else:
+        if WhisperModel is None:
+            raise SystemExit(
+                "faster-whisper is not installed. Set STT_PROVIDER=baidu or install requirements."
+            )
+        print(
+            f"Loading Whisper model {args.model} "
+            f"({args.device}/{args.compute_type})...",
+            flush=True,
+        )
+        transcriber = WhisperModel(
+            args.model, device=args.device, compute_type=args.compute_type
+        )
+
+    deepseek_client: DeepSeekClient | None = None
+    if os.environ.get("ENABLE_DEEPSEEK", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        if deepseek_key:
+            deepseek_client = DeepSeekClient(DeepSeekConfig.from_env())
+        else:
+            print(
+                "WARNING: ENABLE_DEEPSEEK is true but DEEPSEEK_API_KEY is empty; "
+                "structured processing is disabled.",
+                flush=True,
+            )
 
     server = AudioReceiverServer((args.host, args.port), AudioReceiverHandler)
     server.output_dir = args.output.resolve()
-    server.transcriber = transcriber
-    server.transcribe_lock = threading.Lock()
-    server.language = args.language
-    server.converter = OpenCC("t2s")
+    server.recognition_pipeline = RecognitionPipeline(
+        stt_provider,
+        transcriber=transcriber,
+        baidu_client=baidu_client,
+        deepseek_client=deepseek_client,
+        converter=OpenCC("t2s"),
+        language=args.language,
+    )
     print(f"Listening on http://{args.host}:{args.port}/audio", flush=True)
     print(f"Temporary WAV directory: {server.output_dir}", flush=True)
     try:
