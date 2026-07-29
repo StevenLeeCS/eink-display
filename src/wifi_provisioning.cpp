@@ -7,6 +7,13 @@
 #include <WiFi.h>
 #include <cstring>
 
+#include "device_settings.h"
+#include "task_store.h"
+
+extern const uint8_t admin_html_start[]
+    asm("_binary_assets_admin_html_start");
+extern const uint8_t admin_html_end[] asm("_binary_assets_admin_html_end");
+
 namespace wifi_provisioning {
 namespace {
 
@@ -18,50 +25,12 @@ constexpr uint32_t kConnectTimeoutMs = 20000;
 constexpr uint16_t kDnsPort = 53;
 constexpr uint16_t kHttpPort = 80;
 
-static const char kPortalHtml[] PROGMEM = R"html(
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>墨水屏 Wi-Fi 配置</title>
-  <style>
-    *{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;color:#171717;background:#f4f5f7}
-    main{width:min(100%,440px);margin:0 auto;padding:28px 20px}h1{font-size:24px;margin:0 0 8px}
-    p{margin:0 0 20px;color:#555;line-height:1.5}label{display:block;margin:16px 0 6px;font-weight:600}
-    input{width:100%;height:44px;border:1px solid #aaa;background:#fff;padding:0 12px;font-size:16px;border-radius:4px}
-    button{height:44px;border:0;border-radius:4px;background:#111;color:#fff;font-size:16px;font-weight:600;cursor:pointer}
-    form>button{width:100%;margin-top:20px}.network{width:100%;display:flex;justify-content:space-between;align-items:center;
-    margin:0 0 8px;padding:0 12px;background:#fff;color:#171717;border:1px solid #bbb;font-weight:400;text-align:left}
-    .network span:last-child{color:#666;font-size:13px}#networks{min-height:44px}.status{font-size:14px;color:#666}
-  </style>
-</head>
-<body><main>
-  <h1>连接 Wi-Fi</h1>
-  <p>选择 2.4 GHz 网络并输入密码，设备验证成功后会自动重启。</p>
-  <div id="networks" class="status">正在扫描网络...</div>
-  <form action="/save" method="post">
-    <label for="ssid">网络名称</label>
-    <input id="ssid" name="ssid" maxlength="32" required autocomplete="off">
-    <label for="password">密码</label>
-    <input id="password" name="password" type="password" maxlength="63" autocomplete="current-password">
-    <button type="submit">连接</button>
-  </form>
-</main>
-<script>
-fetch('/scan').then(r=>r.json()).then(items=>{
-  const box=document.getElementById('networks');box.textContent='';
-  if(!items.length){box.textContent='未发现网络，可以手动输入名称。';return;}
-  items.forEach(item=>{const button=document.createElement('button');button.type='button';button.className='network';
-    const name=document.createElement('span');name.textContent=item.s;const signal=document.createElement('span');
-    signal.textContent=item.r+' dBm';button.append(name,signal);button.addEventListener('click',()=>{
-      document.getElementById('ssid').value=item.s;document.getElementById('password').focus();});box.append(button);});
-}).catch(()=>{document.getElementById('networks').textContent='扫描失败，可以手动输入网络名称。';});
-</script></body></html>
-)html";
-
 String savedSsid;
 String savedPassword;
+WebServer adminServer(kHttpPort);
+DNSServer adminDnsServer;
+bool adminServerStarted = false;
+bool captivePortalMode = false;
 
 struct CredentialsRecord {
   uint32_t magic;
@@ -114,6 +83,20 @@ String jsonEscape(const String& value) {
   return escaped;
 }
 
+void sendJson(WebServer& server, int status, const String& body) {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(status, "application/json; charset=utf-8", body);
+}
+
+void sendMessage(WebServer& server, int status, const __FlashStringHelper* message) {
+  String response = F("{\"ok\":");
+  response += status >= 200 && status < 300 ? F("true") : F("false");
+  response += F(",\"message\":\"");
+  response += message;
+  response += F("\"}");
+  sendJson(server, status, response);
+}
+
 void loadCredentials() {
   Preferences preferences;
   if (!preferences.begin(kPreferencesNamespace, true)) {
@@ -122,6 +105,7 @@ void loadCredentials() {
     savedPassword = "";
     return;
   }
+
   CredentialsRecord record = {};
   const bool validSize =
       preferences.getBytesLength(kCredentialsKey) == sizeof(record);
@@ -166,6 +150,16 @@ bool saveCredentials(const String& ssid, const String& password) {
   return true;
 }
 
+bool clearCredentials() {
+  Preferences preferences;
+  if (!preferences.begin(kPreferencesNamespace, false)) return false;
+  const bool removed = preferences.remove(kCredentialsKey);
+  preferences.end();
+  savedSsid = "";
+  savedPassword = "";
+  return removed;
+}
+
 bool connectStation(const String& ssid, const String& password) {
   if (ssid.isEmpty()) return false;
 
@@ -201,30 +195,67 @@ void sendPortalRedirect(WebServer& server) {
   server.send(302, "text/plain", "");
 }
 
-bool startPortal(PortalStartedCallback portalStarted) {
-  WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_AP_STA);
-  if (!WiFi.softAP(kSetupApSsid, kSetupApPassword)) {
-    Serial.println("ERROR: Could not start the Wi-Fi setup access point.");
-    return false;
+void sendNotFound(WebServer& server) {
+  if (captivePortalMode) {
+    sendPortalRedirect(server);
+    return;
   }
+  sendJson(server, 404, F("{\"ok\":false,\"message\":\"Not found\"}"));
+}
 
-  if (portalStarted != nullptr) portalStarted();
+void sendAdminPage(WebServer& server) {
+  const size_t length =
+      static_cast<size_t>(admin_html_end - admin_html_start);
+  server.send_P(200, PSTR("text/html; charset=utf-8"),
+                reinterpret_cast<PGM_P>(admin_html_start), length);
+}
 
-  const IPAddress portalIp = WiFi.softAPIP();
-  Serial.printf("Wi-Fi setup AP: %s\n", kSetupApSsid);
-  Serial.printf("Wi-Fi setup password: %s\n", kSetupApPassword);
-  Serial.print("Wi-Fi setup page: http://");
-  Serial.println(portalIp);
+void registerStatusRoutes(WebServer& server) {
+  server.on("/api/status", HTTP_GET, [&server]() {
+    const bool connected = WiFi.status() == WL_CONNECTED;
+    const device_settings::ReceiverSettings& receiver =
+        device_settings::receiver();
+    const device_settings::CloudSettings& cloud = device_settings::cloud();
+    String response;
+    response.reserve(1024);
+    response += F("{\"connected\":");
+    response += connected ? F("true") : F("false");
+    response += F(",\"ssid\":\"");
+    response += jsonEscape(connected ? WiFi.SSID() : savedSsid);
+    response += F("\",\"station_ip\":\"");
+    if (connected) response += WiFi.localIP().toString();
+    response += F("\",\"ap_ip\":\"");
+    response += WiFi.softAPIP().toString();
+    response += F("\",\"rssi\":");
+    response += connected ? String(WiFi.RSSI()) : String(0);
+    response += F(",\"free_heap\":");
+    response += ESP.getFreeHeap();
+    response += F(",\"receiver\":{\"host\":\"");
+    response += jsonEscape(receiver.host);
+    response += F("\",\"port\":");
+    response += receiver.port;
+    response += F(",\"path\":\"");
+    response += jsonEscape(receiver.path);
+    response += F("\"},\"cloud\":{\"baidu_api_key_set\":");
+    response += cloud.baiduApiKey[0] != '\0' ? F("true") : F("false");
+    response += F(",\"baidu_secret_key_set\":");
+    response += cloud.baiduSecretKey[0] != '\0' ? F("true") : F("false");
+    response += F(",\"baidu_speech_url\":\"");
+    response += jsonEscape(cloud.baiduSpeechUrl);
+    response += F("\",\"deepseek_enabled\":");
+    response += cloud.deepseekEnabled ? F("true") : F("false");
+    response += F(",\"deepseek_api_key_set\":");
+    response += cloud.deepseekApiKey[0] != '\0' ? F("true") : F("false");
+    response += F(",\"deepseek_api_url\":\"");
+    response += jsonEscape(cloud.deepseekApiUrl);
+    response += F("\",\"deepseek_model\":\"");
+    response += jsonEscape(cloud.deepseekModel);
+    response += F("\"}}");
+    sendJson(server, 200, response);
+  });
 
-  DNSServer dnsServer;
-  dnsServer.start(kDnsPort, "*", portalIp);
-  WebServer server(kHttpPort);
-
-  server.on("/", HTTP_GET,
-            [&server]() { server.send_P(200, "text/html", kPortalHtml); });
-  server.on("/scan", HTTP_GET, [&server]() {
-    const int count = WiFi.scanNetworks();
+  server.on("/api/networks", HTTP_GET, [&server]() {
+    const int count = WiFi.scanNetworks(false, true);
     String response = "[";
     for (int i = 0; i < count; ++i) {
       if (i > 0) response += ',';
@@ -236,16 +267,58 @@ bool startPortal(PortalStartedCallback portalStarted) {
     }
     response += ']';
     WiFi.scanDelete();
-    server.sendHeader("Cache-Control", "no-store");
-    server.send(200, "application/json", response);
+    sendJson(server, 200, response);
   });
-  server.on("/save", HTTP_POST, [&server]() {
+
+  server.on("/api/tasks", HTTP_GET, [&server]() {
+    String response;
+    response.reserve(15360);
+    response += F("{\"storage_ready\":");
+    response += task_store::ready() ? F("true") : F("false");
+    response += F(",\"active\":[");
+    for (uint8_t region = 0; region < task_store::kRegionCount; ++region) {
+      if (region > 0) response += ',';
+      task_store::CurrentTask task = {};
+      task_store::getCurrent(region, task);
+      response += F("{\"region\":");
+      response += region + 1;
+      response += F(",\"present\":");
+      response += task.present ? F("true") : F("false");
+      response += F(",\"completed\":");
+      response += task.completed ? F("true") : F("false");
+      response += F(",\"text\":\"");
+      response += jsonEscape(task.text);
+      response += F("\"}");
+    }
+    response += F("],\"completed\":[");
+    const size_t count = task_store::completedCount();
+    bool firstCompleted = true;
+    for (size_t index = 0; index < count; ++index) {
+      task_store::CompletedTask task = {};
+      if (!task_store::getCompleted(index, task)) continue;
+      if (!firstCompleted) response += ',';
+      firstCompleted = false;
+      response += F("{\"id\":");
+      response += task.sequence;
+      response += F(",\"region\":");
+      response += task.region + 1;
+      response += F(",\"text\":\"");
+      response += jsonEscape(task.text);
+      response += F("\"}");
+    }
+    response += F("]}");
+    sendJson(server, 200, response);
+  });
+}
+
+void registerConfigurationRoutes(WebServer& server) {
+  server.on("/api/wifi", HTTP_POST, [&server]() {
     String ssid = server.arg("ssid");
     const String password = server.arg("password");
     ssid.trim();
     if (ssid.isEmpty() || ssid.length() > 32 || password.length() > 63 ||
         (!password.isEmpty() && password.length() < 8)) {
-      server.send(400, "text/plain; charset=utf-8", "Wi-Fi 信息格式无效");
+      sendMessage(server, 400, F("Wi-Fi 信息格式无效"));
       return;
     }
 
@@ -260,43 +333,158 @@ bool startPortal(PortalStartedCallback portalStarted) {
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("ERROR: Submitted Wi-Fi credentials did not connect.");
       WiFi.disconnect(false, false);
-      server.send(503, "text/html; charset=utf-8",
-                  "<meta name='viewport' content='width=device-width'>"
-                  "<body style='font-family:sans-serif;padding:32px'>"
-                  "<h2>连接失败</h2><p>请检查网络名称、密码和 2.4 GHz 频段。</p>"
-                  "<p><a href='/'>返回重新配置</a></p></body>");
+      if (!savedSsid.isEmpty()) {
+        WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
+      }
+      sendMessage(server, 503, F("连接失败，请检查名称、密码和 2.4 GHz 频段"));
       return;
     }
 
     if (!saveCredentials(ssid, password)) {
       Serial.println("ERROR: Could not save Wi-Fi credentials.");
-      server.send(500, "text/plain; charset=utf-8", "保存 Wi-Fi 信息失败");
+      sendMessage(server, 500, F("保存 Wi-Fi 信息失败"));
       return;
     }
 
     Serial.println("Wi-Fi credentials verified and saved; restarting.");
-    server.send(200, "text/html; charset=utf-8",
-                "<meta name='viewport' content='width=device-width'>"
-                "<body style='font-family:sans-serif;padding:32px'>"
-                "<h2>连接成功</h2><p>设备即将重新启动。</p></body>");
-    delay(1500);
+    sendMessage(server, 200, F("网络已保存，设备即将重新启动"));
+    delay(900);
     ESP.restart();
   });
 
-  server.on("/generate_204", HTTP_ANY,
-            [&server]() { sendPortalRedirect(server); });
-  server.on("/hotspot-detect.html", HTTP_ANY,
-            [&server]() { sendPortalRedirect(server); });
-  server.on("/connecttest.txt", HTTP_ANY,
-            [&server]() { sendPortalRedirect(server); });
-  server.on("/ncsi.txt", HTTP_ANY,
-            [&server]() { sendPortalRedirect(server); });
-  server.onNotFound([&server]() { sendPortalRedirect(server); });
-  server.begin();
+  server.on("/api/wifi/forget", HTTP_POST, [&server]() {
+    if (savedSsid.isEmpty()) {
+      sendMessage(server, 200, F("当前没有已保存的 Wi-Fi"));
+      return;
+    }
+    if (!clearCredentials()) {
+      sendMessage(server, 500, F("清除 Wi-Fi 信息失败"));
+      return;
+    }
+    WiFi.disconnect(false, false);
+    sendMessage(server, 200, F("已忘记当前 Wi-Fi"));
+  });
 
+  server.on("/api/settings", HTTP_POST, [&server]() {
+    String host = server.arg("host");
+    String path = server.arg("path");
+    const long port = server.arg("port").toInt();
+    host.trim();
+    path.trim();
+    if (port <= 0 || port > 65535 ||
+        !device_settings::saveReceiver(host, static_cast<uint16_t>(port),
+                                       path)) {
+      sendMessage(server, 400, F("识别服务地址格式无效"));
+      return;
+    }
+    sendMessage(server, 200, F("识别服务设置已保存"));
+  });
+
+  server.on("/api/settings/reset", HTTP_POST, [&server]() {
+    device_settings::resetReceiver();
+    sendMessage(server, 200, F("已恢复编译时默认设置"));
+  });
+
+  server.on("/api/cloud", HTTP_POST, [&server]() {
+    device_settings::CloudSettingsUpdate update;
+    update.deepseekEnabled = server.arg("deepseek_enabled") == "1";
+    update.baiduApiKey = server.arg("baidu_api_key");
+    update.baiduSecretKey = server.arg("baidu_secret_key");
+    update.baiduSpeechUrl = server.arg("baidu_speech_url");
+    update.deepseekApiKey = server.arg("deepseek_api_key");
+    update.deepseekApiUrl = server.arg("deepseek_api_url");
+    update.deepseekModel = server.arg("deepseek_model");
+    if (!device_settings::saveCloud(update, true)) {
+      sendMessage(server, 400, F("云 API 配置格式无效"));
+      return;
+    }
+    sendMessage(server, 200, F("云 API 配置已保存"));
+  });
+
+  server.on("/api/cloud/reset", HTTP_POST, [&server]() {
+    device_settings::resetCloud();
+    sendMessage(server, 200, F("云 API 配置已清除"));
+  });
+
+  server.on("/api/tasks/history/clear", HTTP_POST, [&server]() {
+    if (!task_store::clearCompleted()) {
+      sendMessage(server, 500, F("清除完成记录失败"));
+      return;
+    }
+    sendMessage(server, 200, F("完成记录已清除"));
+  });
+}
+
+void registerSystemRoutes(WebServer& server) {
+  server.on("/api/restart", HTTP_POST, [&server]() {
+    sendMessage(server, 200, F("设备正在重新启动"));
+    delay(600);
+    ESP.restart();
+  });
+
+  server.on("/api/exit", HTTP_POST, [&server]() {
+    if (!captivePortalMode) {
+      sendMessage(server, 409, F("设备已处于正常工作模式"));
+      return;
+    }
+    if (savedSsid.isEmpty()) {
+      sendMessage(server, 409, F("请先配置 Wi-Fi"));
+      return;
+    }
+    sendMessage(server, 200, F("正在退出管理模式"));
+    delay(600);
+    ESP.restart();
+  });
+}
+
+void startAdminServer() {
+  if (adminServerStarted) return;
+
+  adminServer.on("/", HTTP_GET,
+                 []() { sendAdminPage(adminServer); });
+  registerStatusRoutes(adminServer);
+  registerConfigurationRoutes(adminServer);
+  registerSystemRoutes(adminServer);
+  adminServer.on("/generate_204", HTTP_ANY,
+                 []() { sendNotFound(adminServer); });
+  adminServer.on("/hotspot-detect.html", HTTP_ANY,
+                 []() { sendNotFound(adminServer); });
+  adminServer.on("/connecttest.txt", HTTP_ANY,
+                 []() { sendNotFound(adminServer); });
+  adminServer.on("/ncsi.txt", HTTP_ANY,
+                 []() { sendNotFound(adminServer); });
+  adminServer.onNotFound([]() { sendNotFound(adminServer); });
+  adminServer.begin();
+  adminServerStarted = true;
+  Serial.println("Management HTTP server ready.");
+}
+
+bool startPortal(PortalStartedCallback portalStarted) {
+  captivePortalMode = true;
+  const bool stationWasConnected = WiFi.status() == WL_CONNECTED;
+  if (!stationWasConnected) WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+  if (!WiFi.softAP(kSetupApSsid, kSetupApPassword)) {
+    Serial.println("ERROR: Could not start the management access point.");
+    return false;
+  }
+
+  if (portalStarted != nullptr) portalStarted();
+
+  const IPAddress portalIp = WiFi.softAPIP();
+  Serial.printf("Management AP: %s\n", kSetupApSsid);
+  Serial.printf("Management password: %s\n", kSetupApPassword);
+  Serial.print("Management page: http://");
+  Serial.println(portalIp);
+
+  adminDnsServer.start(kDnsPort, "*", portalIp);
+  startAdminServer();
+
+  Serial.println("Management portal ready.");
   while (true) {
-    dnsServer.processNextRequest();
-    server.handleClient();
+    adminDnsServer.processNextRequest();
+    adminServer.handleClient();
     delay(5);
   }
   return false;
@@ -310,13 +498,16 @@ bool hasSavedCredentials() {
 }
 
 bool begin(bool forcePortal, PortalStartedCallback portalStarted) {
+  device_settings::begin();
   loadCredentials();
   if (forcePortal) {
-    Serial.println("Wi-Fi setup requested by the A1+A2 hold gesture.");
+    Serial.println("Management mode requested by the A1+A2 hold gesture.");
     return startPortal(portalStarted);
   }
 
   if (!savedSsid.isEmpty() && connectStation(savedSsid, savedPassword)) {
+    captivePortalMode = false;
+    startAdminServer();
     return true;
   }
 
@@ -327,6 +518,11 @@ bool reconnect() {
   if (WiFi.status() == WL_CONNECTED) return true;
   loadCredentials();
   return connectStation(savedSsid, savedPassword);
+}
+
+void poll() {
+  if (captivePortalMode || !adminServerStarted) return;
+  adminServer.handleClient();
 }
 
 }  // namespace wifi_provisioning

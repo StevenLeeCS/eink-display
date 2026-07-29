@@ -37,9 +37,22 @@ temporary PC recognition path incrementally.
   200 ms of sustained activity. A silent three-second hold immediately resets
   that region without waiting for release.
 - Successful recognition replaces the selected region and starts incomplete.
-- First use opens an ESP-hosted phone provisioning portal; credentials are
+- First use opens an ESP-hosted phone management portal; Wi-Fi credentials are
   verified and stored in project-specific NVS. Holding A1+A2 for two seconds
-  re-enters provisioning.
+  enters the same explicit management mode.
+- The phone portal shows device status, scans/switches/forgets Wi-Fi, manages
+  the recognition gateway host/port/path, and provides restart and exit
+  controls. It remains available at the device's station-mode IP during normal
+  idle operation; the A1+A2 gesture additionally opens the isolated AP portal.
+  Receiver settings are versioned in NVS and take precedence over compile-time
+  defaults.
+- The portal has a task view for both active regions and the newest 30 completed
+  task records. Active task text/completion state and completed history survive
+  restart in a versioned LittleFS record; history can be cleared independently.
+- Baidu speech and DeepSeek endpoint/key fields can be maintained from the API
+  page. Cloud settings are stored in NVS, while secret values are never returned
+  by status APIs. These device-side values remain reserved until the firmware's
+  direct-cloud adapter replaces the Python gateway.
 - The receiver can use local faster-whisper or Baidu STT, then optionally ask
   DeepSeek for bounded `time/place/person/event` task fields.
 - Non-task speech shows a marker-free prompt in an empty region. If the region
@@ -55,10 +68,17 @@ temporary PC recognition path incrementally.
   event handling.
 - `src/voice_upload.cpp`: buttons, pre-roll, VAD, Wi-Fi, chunked upload, and
   response-to-region events.
+- `src/wifi_provisioning.cpp`: first-use provisioning, the normal-mode HTTP
+  server, and the AP-mode phone management HTTP API.
+- `src/device_settings.cpp`: versioned NVS storage for runtime receiver
+  and cloud API settings.
+- `src/task_store.cpp`: versioned LittleFS cache for two active tasks and the
+  30-entry completed-task ring.
 - `src/inmp441_audio.cpp`: INMP441 I2S initialization and PCM capture.
 - `src/ascii_font_16.cpp`, `src/chinese_font_16.cpp`: access embedded font data.
-- `assets/`: required ASCII and GB2312 level-1 font binaries. These are not
-  general display images and must remain embedded by `platformio.ini`.
+- `assets/`: required ASCII/GB2312 font binaries and the embedded phone admin
+  page. These are not general display images and must remain embedded by
+  `platformio.ini`.
 - `tools/audio_receiver.py`: streaming WAV upload and HTTP response gateway.
 - `tools/recognition_pipeline.py`: provider selection, STT, DeepSeek fallback
   and display-text normalization.
@@ -73,10 +93,13 @@ temporary PC recognition path incrementally.
 ## Local Configuration
 
 Copy `include/network_config.example.h` to `include/network_config.h` and set the
-temporary audio-receiver address. Wi-Fi credentials are entered through the
+default temporary audio-receiver address. The phone portal can override this
+host, port and path in NVS. Wi-Fi credentials are also entered through the
 device portal and stored in NVS. To enable cloud recognition, copy
 `tools/cloud_config.example.env` to `tools/cloud_config.env`, fill the provider
-keys, and set `STT_PROVIDER=baidu`; the real env file is ignored by Git.
+keys, and set `STT_PROVIDER=baidu`; the real env file is ignored by Git. Cloud
+values entered in the device portal are stored for the future direct-cloud
+adapter and do not configure the current Python process.
 
 ## Target Product Flow
 

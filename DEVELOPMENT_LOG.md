@@ -20,6 +20,10 @@ Update `README.md` only when explicitly requested.
   prompt, while existing task content and completion state are preserved.
 - Split provider orchestration from the HTTP receiver, retained transcript text
   when structured fields are incomplete, and added Baidu token expiry refresh.
+- Added a mobile admin page for Wi-Fi, receiver and reserved cloud API settings;
+  it is reachable through both the setup AP and the device's normal LAN IP.
+- Added LittleFS persistence for both active regions and a 30-entry completed
+  task history, with restart recovery and backend display/clear controls.
 
 ### Current state
 
@@ -27,6 +31,8 @@ Update `README.md` only when explicitly requested.
   `ENABLE_DEEPSEEK=true` and fill the DeepSeek key to enable task structuring.
 - ESP32 audio streaming requests remain unchanged; the response protocol and
   display events now include an explicit non-task state.
+- Firmware, Python tests and the 390 px mobile layout pass; flashing and
+  physical persistence verification remain manual.
 
 ## 2026-07-28
 

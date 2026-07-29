@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f3f4f2">
+  <title>墨水任务管理</title>
+  <style>
+    :root{color-scheme:light;--bg:#f3f4f2;--surface:#fff;--text:#17201b;--muted:#647069;--line:#d9dedb;--accent:#176b48;--accent-2:#0f5135;--danger:#a43d35;--warn:#a26716}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15px;line-height:1.45;letter-spacing:0}
+    header{position:sticky;top:0;z-index:3;background:rgba(243,244,242,.96);border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
+    .bar{width:min(100%,680px);min-height:64px;margin:auto;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+    h1{margin:0;font-size:20px;font-weight:720}.connection{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:13px;white-space:nowrap}.dot{width:9px;height:9px;border-radius:50%;background:#89938d}.dot.online{background:#178252}.dot.offline{background:var(--warn)}
+    main{width:min(100%,680px);margin:auto;padding:18px 16px calc(34px + env(safe-area-inset-bottom))}
+    nav{display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--line);margin-bottom:18px}.tab{min-width:0;height:44px;padding:0 3px;border:0;border-bottom:3px solid transparent;background:transparent;color:var(--muted);font:inherit;cursor:pointer}.tab.active{border-color:var(--accent);color:var(--accent-2);font-weight:650}
+    .panel{display:none}.panel.active{display:block}.section-title{margin:2px 2px 10px;font-size:14px;color:var(--muted);font-weight:650;display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .card,.task{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:14px}.card h2{font-size:17px;margin:0 0 14px}.metric{display:flex;justify-content:space-between;gap:18px;padding:10px 0;border-bottom:1px solid #edf0ee}.metric:last-child{border:0}.metric span:first-child{color:var(--muted)}.metric strong{font-weight:620;text-align:right;overflow-wrap:anywhere}
+    label{display:block;margin:14px 0 6px;font-size:13px;color:var(--muted);font-weight:650}input{width:100%;height:46px;border:1px solid #aeb7b1;border-radius:6px;background:#fff;color:var(--text);padding:0 12px;font:inherit;outline:none}input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(23,107,72,.12)}
+    .row{display:grid;grid-template-columns:minmax(0,1fr) 112px;gap:10px}.actions{display:flex;gap:10px;margin-top:18px}.button{min-height:44px;border:1px solid var(--accent);border-radius:6px;padding:0 16px;background:var(--accent);color:#fff;font:inherit;font-weight:650;cursor:pointer}.button:disabled{opacity:.55;cursor:wait}.button.secondary{background:#fff;color:var(--accent-2)}.button.danger{border-color:#d7b1ad;background:#fff;color:var(--danger)}.button.compact{min-height:34px;padding:0 11px;font-size:13px}.actions .button{flex:1}
+    .networks,.task-list{display:grid;gap:8px;min-height:44px}.network{width:100%;min-height:46px;display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:0 12px;color:var(--text);font:inherit;text-align:left;cursor:pointer}.network small{color:var(--muted);white-space:nowrap}.empty{padding:14px 2px;color:var(--muted)}
+    .task{margin-bottom:0;padding:14px 15px}.task-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:7px}.task-head strong{font-size:13px}.task-head span{font-size:12px;color:var(--muted)}.task p{margin:0;overflow-wrap:anywhere;white-space:pre-wrap}.state-complete{color:var(--accent-2)!important;font-weight:650}
+    .check-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:16px}.check-row label{margin:0;color:var(--text);font-size:15px}.check-row input{width:22px;height:22px;box-shadow:none}.key-state{margin:6px 0 0;color:var(--muted);font-size:12px}.toast{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));z-index:8;max-width:calc(100% - 32px);transform:translate(-50%,20px);opacity:0;pointer-events:none;background:#17201b;color:#fff;border-radius:6px;padding:11px 15px;transition:.18s}.toast.show{transform:translate(-50%,0);opacity:1}.toast.error{background:#7e2d28}
+    @media(max-width:390px){.bar{padding-inline:14px}main{padding-inline:12px}.card{padding:15px}.row{grid-template-columns:minmax(0,1fr) 96px}.actions{flex-direction:column}.connection span:last-child{display:none}.tab{font-size:14px}}
+  </style>
+</head>
+<body>
+  <header><div class="bar"><h1>墨水任务管理</h1><div class="connection"><span id="dot" class="dot"></span><span id="connection">读取中</span></div></div></header>
+  <main>
+    <nav aria-label="管理页面">
+      <button class="tab active" data-panel="overview">概览</button>
+      <button class="tab" data-panel="tasks">任务</button>
+      <button class="tab" data-panel="wifi">网络</button>
+      <button class="tab" data-panel="api">API</button>
+      <button class="tab" data-panel="system">系统</button>
+    </nav>
+
+    <section id="overview" class="panel active">
+      <div class="section-title">设备状态</div>
+      <div class="card">
+        <div class="metric"><span>当前网络</span><strong id="current-ssid">--</strong></div>
+        <div class="metric"><span>设备地址</span><strong id="station-ip">--</strong></div>
+        <div class="metric"><span>信号强度</span><strong id="rssi">--</strong></div>
+        <div class="metric"><span>可用内存</span><strong id="heap">--</strong></div>
+      </div>
+      <div class="section-title">识别网关</div>
+      <div class="card">
+        <div class="metric"><span>主机</span><strong id="summary-host">--</strong></div>
+        <div class="metric"><span>端口</span><strong id="summary-port">--</strong></div>
+        <div class="metric"><span>路径</span><strong id="summary-path">--</strong></div>
+      </div>
+    </section>
+
+    <section id="tasks" class="panel">
+      <div class="section-title">当前分区</div>
+      <div id="active-tasks" class="task-list"><div class="empty">正在读取...</div></div>
+      <div class="section-title"><span>完成记录 <span id="history-count">0/30</span></span><button id="clear-history" class="button danger compact" type="button">清空</button></div>
+      <div id="completed-tasks" class="task-list"><div class="empty">暂无完成记录</div></div>
+    </section>
+
+    <section id="wifi" class="panel">
+      <div class="section-title">附近的 2.4 GHz 网络</div>
+      <div class="card">
+        <div id="networks" class="networks"><div class="empty">等待扫描</div></div>
+        <button id="scan" class="button secondary" type="button">重新扫描</button>
+      </div>
+      <div class="section-title">连接设置</div>
+      <form id="wifi-form" class="card">
+        <label for="ssid">网络名称</label>
+        <input id="ssid" name="ssid" maxlength="32" required autocomplete="off">
+        <label for="password">网络密码</label>
+        <input id="password" name="password" type="password" maxlength="63" autocomplete="current-password">
+        <button class="button" type="submit">验证并切换</button>
+      </form>
+    </section>
+
+    <section id="api" class="panel">
+      <div class="section-title">语音识别网关</div>
+      <form id="service-form" class="card">
+        <label for="host">主机地址</label>
+        <input id="host" name="host" maxlength="63" required inputmode="url" autocomplete="off">
+        <div class="row">
+          <div><label for="path">上传路径</label><input id="path" name="path" maxlength="63" required autocomplete="off"></div>
+          <div><label for="port">端口</label><input id="port" name="port" type="number" min="1" max="65535" required inputmode="numeric"></div>
+        </div>
+        <div class="actions"><button class="button" type="submit">保存网关</button><button id="service-reset" class="button secondary" type="button">恢复默认</button></div>
+      </form>
+      <div class="section-title">设备端云 API（预留）</div>
+      <form id="cloud-form" class="card">
+        <label for="baidu-api-key">API Key</label>
+        <input id="baidu-api-key" name="baidu_api_key" type="password" maxlength="95" autocomplete="new-password">
+        <div id="baidu-api-key-state" class="key-state">未配置</div>
+        <label for="baidu-secret-key">Secret Key</label>
+        <input id="baidu-secret-key" name="baidu_secret_key" type="password" maxlength="95" autocomplete="new-password">
+        <div id="baidu-secret-key-state" class="key-state">未配置</div>
+        <label for="baidu-speech-url">识别地址</label>
+        <input id="baidu-speech-url" name="baidu_speech_url" maxlength="127" required inputmode="url" autocomplete="off">
+        <div class="check-row"><label for="deepseek-enabled">启用 DeepSeek</label><input id="deepseek-enabled" name="deepseek_enabled" type="checkbox" value="1"></div>
+        <label for="deepseek-api-key">DeepSeek API Key</label>
+        <input id="deepseek-api-key" name="deepseek_api_key" type="password" maxlength="95" autocomplete="new-password">
+        <div id="deepseek-api-key-state" class="key-state">未配置</div>
+        <label for="deepseek-api-url">DeepSeek 地址</label>
+        <input id="deepseek-api-url" name="deepseek_api_url" maxlength="127" required inputmode="url" autocomplete="off">
+        <label for="deepseek-model">模型</label>
+        <input id="deepseek-model" name="deepseek_model" maxlength="39" required autocomplete="off">
+        <div class="actions"><button class="button" type="submit">保存 API</button><button id="cloud-reset" class="button secondary" type="button">清除配置</button></div>
+      </form>
+    </section>
+
+    <section id="system" class="panel">
+      <div class="section-title">设备操作</div>
+      <div class="card">
+        <div class="actions"><button id="exit" class="button" type="button">退出管理模式</button><button id="restart" class="button secondary" type="button">重新启动</button></div>
+      </div>
+      <div class="section-title">网络数据</div>
+      <div class="card"><button id="forget" class="button danger" type="button">忘记当前 Wi-Fi</button></div>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script>
+    const $=id=>document.getElementById(id);let toastTimer;
+    function toast(message,error=false){const box=$('toast');box.textContent=message;box.className='toast show'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>box.className='toast',2600)}
+    async function request(url,options){const response=await fetch(url,options);let body={};try{body=await response.json()}catch(e){}if(!response.ok)throw new Error(body.message||'操作失败');return body}
+    function encode(form){return new URLSearchParams(new FormData(form))}
+    function setBusy(button,busy){button.disabled=busy}
+    function showPanel(id){document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.panel===id));document.querySelectorAll('.panel').forEach(panel=>panel.classList.toggle('active',panel.id===id));if(id==='wifi')scanNetworks();if(id==='tasks')loadTasks()}
+    document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>showPanel(tab.dataset.panel)));
+
+    function setKeyState(id,configured){$(id).textContent=configured?'已配置，留空保持不变':'未配置'}
+    async function loadStatus(){try{const data=await request('/api/status');$('connection').textContent=data.connected?'已连接':'未连接';$('dot').className='dot '+(data.connected?'online':'offline');$('current-ssid').textContent=data.ssid||'未配置';$('station-ip').textContent=data.station_ip||'--';$('rssi').textContent=data.connected?data.rssi+' dBm':'--';$('heap').textContent=Math.round(data.free_heap/1024)+' KB';$('summary-host').textContent=data.receiver.host;$('summary-port').textContent=data.receiver.port;$('summary-path').textContent=data.receiver.path;$('host').value=data.receiver.host;$('port').value=data.receiver.port;$('path').value=data.receiver.path;$('ssid').value=data.ssid||'';$('baidu-api-key').value='';$('baidu-secret-key').value='';$('deepseek-api-key').value='';$('baidu-speech-url').value=data.cloud.baidu_speech_url;$('deepseek-enabled').checked=data.cloud.deepseek_enabled;$('deepseek-api-url').value=data.cloud.deepseek_api_url;$('deepseek-model').value=data.cloud.deepseek_model;setKeyState('baidu-api-key-state',data.cloud.baidu_api_key_set);setKeyState('baidu-secret-key-state',data.cloud.baidu_secret_key_set);setKeyState('deepseek-api-key-state',data.cloud.deepseek_api_key_set)}catch(error){$('connection').textContent='读取失败';$('dot').className='dot offline';toast(error.message,true)}}
+    function taskElement(task,history=false){const item=document.createElement('article');item.className='task';const head=document.createElement('div');head.className='task-head';const region=document.createElement('strong');region.textContent='A'+task.region;const state=document.createElement('span');if(history){state.textContent='#'+task.id}else{state.textContent=task.present?(task.completed?'已完成':'未完成'):'空';if(task.completed)state.className='state-complete'}head.append(region,state);const text=document.createElement('p');text.textContent=task.present===false?'暂无任务':task.text;item.append(head,text);return item}
+    async function loadTasks(){const active=$('active-tasks'),completed=$('completed-tasks');active.innerHTML='<div class="empty">正在读取...</div>';try{const data=await request('/api/tasks');active.textContent='';data.active.forEach(task=>active.append(taskElement(task)));completed.textContent='';$('history-count').textContent=data.completed.length+'/30';if(!data.completed.length)completed.innerHTML='<div class="empty">暂无完成记录</div>';data.completed.forEach(task=>completed.append(taskElement(task,true)));if(!data.storage_ready)toast('任务存储不可用',true)}catch(error){active.innerHTML='<div class="empty">读取失败</div>';toast(error.message,true)}}
+    async function scanNetworks(){const button=$('scan'),box=$('networks');setBusy(button,true);box.innerHTML='<div class="empty">正在扫描...</div>';try{const items=await request('/api/networks');box.textContent='';if(!items.length){box.innerHTML='<div class="empty">未发现网络</div>'}items.forEach(item=>{const network=document.createElement('button');network.type='button';network.className='network';const name=document.createElement('span');name.textContent=item.s;const signal=document.createElement('small');signal.textContent=item.r+' dBm';network.append(name,signal);network.addEventListener('click',()=>{$('ssid').value=item.s;$('password').focus()});box.append(network)})}catch(error){box.innerHTML='<div class="empty">扫描失败</div>';toast(error.message,true)}finally{setBusy(button,false)}}
+    $('scan').addEventListener('click',scanNetworks);
+    $('wifi-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.submitter;setBusy(button,true);try{const data=await request('/api/wifi',{method:'POST',body:encode(event.currentTarget)});toast(data.message);setTimeout(()=>location.reload(),2200)}catch(error){toast(error.message,true);setBusy(button,false)}});
+    $('service-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.submitter;setBusy(button,true);try{const data=await request('/api/settings',{method:'POST',body:encode(event.currentTarget)});toast(data.message);await loadStatus()}catch(error){toast(error.message,true)}finally{setBusy(button,false)}});
+    $('service-reset').addEventListener('click',async event=>{setBusy(event.currentTarget,true);try{const data=await request('/api/settings/reset',{method:'POST'});toast(data.message);await loadStatus()}catch(error){toast(error.message,true)}finally{setBusy(event.currentTarget,false)}});
+    $('cloud-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.submitter;setBusy(button,true);try{const data=await request('/api/cloud',{method:'POST',body:encode(event.currentTarget)});event.currentTarget.querySelectorAll('input[type=password]').forEach(input=>input.value='');toast(data.message);await loadStatus()}catch(error){toast(error.message,true)}finally{setBusy(button,false)}});
+    $('cloud-reset').addEventListener('click',async event=>{if(!confirm('确定清除云 API 配置？'))return;setBusy(event.currentTarget,true);try{const data=await request('/api/cloud/reset',{method:'POST'});toast(data.message);await loadStatus()}catch(error){toast(error.message,true)}finally{setBusy(event.currentTarget,false)}});
+    $('clear-history').addEventListener('click',async event=>{if(!confirm('确定清空 30 条完成记录？'))return;setBusy(event.currentTarget,true);try{const data=await request('/api/tasks/history/clear',{method:'POST'});toast(data.message);await loadTasks()}catch(error){toast(error.message,true)}finally{setBusy(event.currentTarget,false)}});
+    async function systemAction(url,confirmation){if(confirmation&&!confirm(confirmation))return;try{const data=await request(url,{method:'POST'});toast(data.message)}catch(error){toast(error.message,true)}}
+    $('forget').addEventListener('click',()=>systemAction('/api/wifi/forget','确定忘记当前 Wi-Fi？'));
+    $('restart').addEventListener('click',()=>systemAction('/api/restart'));
+    $('exit').addEventListener('click',()=>systemAction('/api/exit'));
+    loadStatus();
+  </script>
+</body>
+</html>

@@ -5,8 +5,8 @@
 #include <WiFiClient.h>
 #include <cstring>
 
+#include "device_settings.h"
 #include "inmp441_audio.h"
-#include "network_config.h"
 #include "task_processing.h"
 #include "wifi_provisioning.h"
 
@@ -57,7 +57,7 @@ void emitRegionEvent(uint8_t region, RegionEvent event,
 }
 
 bool configurationIsReady() {
-  return voice_config::kServerHost[0] != '\0';
+  return device_settings::receiver().host[0] != '\0';
 }
 
 bool connectWifi() {
@@ -246,18 +246,19 @@ void handleButtonPress(uint8_t region, int buttonPin) {
     return;
   }
 
+  const device_settings::ReceiverSettings& receiver =
+      device_settings::receiver();
   WiFiClient client;
   Serial.printf("Connecting to audio receiver at %s:%u...\n",
-                voice_config::kServerHost, voice_config::kServerPort);
-  if (!client.connect(voice_config::kServerHost, voice_config::kServerPort)) {
+                receiver.host, receiver.port);
+  if (!client.connect(receiver.host, receiver.port)) {
     Serial.println("ERROR: Cannot connect to the audio receiver.");
     emitRegionEvent(region, RegionEvent::Error);
     return;
   }
 
-  client.printf("POST %s HTTP/1.1\r\n", voice_config::kServerPath);
-  client.printf("Host: %s:%u\r\n", voice_config::kServerHost,
-                voice_config::kServerPort);
+  client.printf("POST %s HTTP/1.1\r\n", receiver.path);
+  client.printf("Host: %s:%u\r\n", receiver.host, receiver.port);
   client.println("Content-Type: application/octet-stream");
   client.println("Transfer-Encoding: chunked");
   client.printf("X-Sample-Rate: %u\r\n", inmp441_audio::kSampleRate);
@@ -391,7 +392,7 @@ bool begin() {
   }
   if (!configurationIsReady()) {
     Serial.println(
-        "ERROR: Configure the receiver in include/network_config.h before uploading.");
+        "ERROR: Configure the recognition receiver in management mode.");
     return false;
   }
   if (!inmp441_audio::begin()) return false;
@@ -402,11 +403,13 @@ bool begin() {
   }
 
   initialized = true;
-  Serial.println("Voice recorder ready: hold D0 for the top region or D9 for the bottom region.");
+  Serial.println(
+      "Voice recorder ready: hold D0 for the top region or D9 for the bottom region.");
   return true;
 }
 
 void poll() {
+  wifi_provisioning::poll();
   if (!initialized) {
     delay(1000);
     return;
@@ -418,7 +421,7 @@ void poll() {
   if (bothButtonsPressed) {
     if (bothButtonsPressedAt == 0) bothButtonsPressedAt = millis();
     if (millis() - bothButtonsPressedAt >= kProvisioningGestureMs) {
-      Serial.println("A1+A2 held for two seconds; opening Wi-Fi setup.");
+      Serial.println("A1+A2 held for two seconds; opening management mode.");
       wifi_provisioning::begin(true, showProvisioningStatus);
     }
     delay(5);

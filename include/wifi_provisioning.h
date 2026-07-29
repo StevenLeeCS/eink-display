@@ -10,5 +10,6 @@ using PortalStartedCallback = void (*)();
 bool hasSavedCredentials();
 bool begin(bool forcePortal, PortalStartedCallback portalStarted = nullptr);
 bool reconnect();
+void poll();
 
 }  // namespace wifi_provisioning

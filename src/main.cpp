@@ -4,6 +4,7 @@
 
 #include "ascii_font_16.h"
 #include "chinese_font_16.h"
+#include "task_store.h"
 #include "voice_upload.h"
 
 namespace {
@@ -443,6 +444,31 @@ bool drawRecognitionRegion(uint8_t region, const char* text) {
                            kVoiceTextHeight, visibleText);
 }
 
+void restoreCachedTasks() {
+  if (!task_store::ready()) return;
+  for (uint8_t region = 0; region < kVoiceRegionCount; ++region) {
+    task_store::CurrentTask task = {};
+    if (!task_store::getCurrent(region, task) || !task.present) continue;
+    if (!drawRecognitionRegion(region, task.text)) {
+      Serial.printf("ERROR: Cached task for region %u could not be rendered.\n",
+                    static_cast<unsigned>(region + 1));
+      continue;
+    }
+    if (task.completed) {
+      regionCompleted[region] = true;
+      drawCompletionMarker(regionMarkerX[region], regionMarkerY[region], true);
+    }
+  }
+}
+
+void clearCachedTask(uint8_t region) {
+  task_store::CurrentTask task = {};
+  if (task_store::getCurrent(region, task) && task.present &&
+      !task_store::clearCurrent(region)) {
+    Serial.println("ERROR: Current task cache could not be cleared.");
+  }
+}
+
 void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
                         const char* text) {
   if (!voiceDisplayReady) {
@@ -460,6 +486,9 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         Serial.println("ERROR: Recognition text could not be rendered.");
         return;
       }
+      if (!task_store::setCurrent(region, text)) {
+        Serial.println("ERROR: Recognition task could not be cached.");
+      }
       break;
     case voice_upload::RegionEvent::NoSpeech:
       if (!drawMarkerFreeRegion(
@@ -467,6 +496,7 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         Serial.println("ERROR: No-speech prompt could not be rendered.");
         return;
       }
+      clearCachedTask(region);
       break;
     case voice_upload::RegionEvent::NotTask:
       if (regionHasResult[region]) {
@@ -487,12 +517,16 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
       regionCompleted[region] = !regionCompleted[region];
       drawCompletionMarker(regionMarkerX[region], regionMarkerY[region],
                            regionCompleted[region]);
+      if (!task_store::setCompleted(region, regionCompleted[region])) {
+        Serial.println("ERROR: Task completion state could not be saved.");
+      }
       break;
     case voice_upload::RegionEvent::Reset:
       if (!drawInitialRegion(region)) {
         Serial.println("ERROR: Initial region prompt could not be rendered.");
         return;
       }
+      clearCachedTask(region);
       break;
     case voice_upload::RegionEvent::Status:
       if (!drawMarkerFreeRegion(region, text)) {
@@ -506,6 +540,7 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         Serial.println("ERROR: Generic error prompt could not be rendered.");
         return;
       }
+      clearCachedTask(region);
       break;
   }
 
@@ -522,9 +557,13 @@ void setup() {
 
   voice_upload::setEventCallback(displayRegionEvent);
   memset(framebuffer, 0xFF, sizeof(framebuffer));
+  if (!task_store::begin()) {
+    Serial.println("ERROR: Task cache is unavailable.");
+  }
   if (!drawInitialVoicePrompt()) {
     Serial.println("ERROR: Initial voice prompt could not be rendered.");
   }
+  restoreCachedTasks();
   const bool displayInitialized = display.begin() && display.display(framebuffer);
   if (displayInitialized) {
     voiceDisplayReady = true;
