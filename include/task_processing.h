@@ -12,7 +12,6 @@ struct TaskRecord {
   String rawText;
   String time;
   String place;
-  String person;
   String event;
 };
 

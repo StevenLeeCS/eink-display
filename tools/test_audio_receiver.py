@@ -13,7 +13,11 @@ from audio_receiver import (
     task_detection_header,
 )
 from cloud_services import CloudServiceError, TaskRecord
-from recognition_pipeline import RecognitionPipeline, structure_for_display
+from recognition_pipeline import (
+    RecognitionPipeline,
+    fit_display_text,
+    structure_for_display,
+)
 
 
 class ChunkedAudioTest(unittest.TestCase):
@@ -86,6 +90,13 @@ class ChunkedAudioTest(unittest.TestCase):
 
 
 class RecognitionPipelineTest(unittest.TestCase):
+    def test_display_text_is_limited_to_three_lines(self) -> None:
+        displayed = fit_display_text("一" * 60)
+
+        lines = displayed.splitlines()
+        self.assertEqual(3, len(lines))
+        self.assertTrue(all(len(line) == 16 for line in lines))
+
     def test_local_transcript_is_cleaned_for_display(self) -> None:
         class FakeTranscriber:
             def transcribe(self, *args: object, **kwargs: object) -> tuple[list[object], object]:

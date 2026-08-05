@@ -12,7 +12,7 @@ constexpr char kStorePath[] = "/tasks.bin";
 constexpr char kTempPath[] = "/tasks.tmp";
 constexpr char kBackupPath[] = "/tasks.bak";
 constexpr uint32_t kStoreMagic = 0x5441534BU;  // "TASK"
-constexpr uint8_t kStoreVersion = 1;
+constexpr uint8_t kStoreVersion = 2;
 
 struct StoredCurrentTask {
   uint8_t present;
@@ -195,15 +195,16 @@ bool begin() {
     Serial.println("ERROR: Not enough memory to load task storage.");
     return false;
   }
-  if (loadFrom(kStorePath, *candidate) ||
-      loadFrom(kBackupPath, *candidate)) {
+  const bool loaded = loadFrom(kStorePath, *candidate) ||
+                      loadFrom(kBackupPath, *candidate);
+  if (loaded) {
     store = *candidate;
   } else {
     initializeEmptyStore();
   }
   delete candidate;
   storeReady = true;
-  if (!LittleFS.exists(kStorePath) && !persist()) {
+  if (!loaded && !persist()) {
     Serial.println("ERROR: Could not initialize task storage file.");
     storeReady = false;
   }

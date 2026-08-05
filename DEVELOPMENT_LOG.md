@@ -3,6 +3,29 @@
 Daily handoff notes for developers and AI agents. Add new dates at the top.
 Update `README.md` only when explicitly requested.
 
+## 2026-08-05
+
+### Completed
+
+- Reworked the portrait UI for the case: four 69 px task openings plus a fixed
+  function opening, three 16 px text lines per task and horizontal dividers.
+- Kept A1/A2 on their existing buttons, mapped simultaneous A1+A2 operation to
+  A3, and left A4 as a display-only prompt for the current hardware stage.
+- Moved Wi-Fi setup status to the function opening and added the persistent
+  welcome text; mapped the unavailable full-width exclamation glyph to `!`.
+- Removed the person field from structured tasks and bounded AI/fallback output
+  to three lines of 16 full-width characters each.
+- Expanded active-task persistence from two to four regions and upgraded its
+  LittleFS record version.
+- Served captive-portal probe paths without redirects and documented that
+  proxy/TUN DNS interception may require disabling the proxy or opening
+  `192.168.4.1` directly.
+
+### Current state
+
+- Python tests, firmware compilation and diff checks pass; flashing and final
+  alignment against the physical case remain manual.
+
 ## 2026-07-29
 
 ### Completed

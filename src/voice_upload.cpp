@@ -8,6 +8,7 @@
 #include "device_settings.h"
 #include "inmp441_audio.h"
 #include "task_processing.h"
+#include "ui_layout.h"
 #include "wifi_provisioning.h"
 
 namespace voice_upload {
@@ -16,14 +17,17 @@ namespace {
 constexpr uint32_t kMaxRecordingSeconds = 60;
 constexpr uint32_t kWriteTimeoutMs = 5000;
 constexpr uint32_t kButtonDebounceMs = 40;
+constexpr uint32_t kChordDetectionMs = 120;
 constexpr uint32_t kShortPressMs = 500;
-constexpr uint32_t kProvisioningGestureMs = 2000;
 constexpr uint32_t kResetRecordingSeconds = 3;
 constexpr int32_t kSpeechRmsThreshold = 300;
 constexpr uint32_t kVadIgnoreMs = 300;
 constexpr uint32_t kSpeechConfirmationMs = 200;
-constexpr uint8_t kRegionCount = 2;
-constexpr int kButtonPins[kRegionCount] = {2, 9};  // D0, D9
+constexpr uint8_t kPhysicalButtonCount = 2;
+constexpr int kButtonPins[kPhysicalButtonCount] = {2, 9};  // D0, D9
+constexpr uint8_t kButtonA1Mask = 0x01;
+constexpr uint8_t kButtonA2Mask = 0x02;
+constexpr uint8_t kButtonA3Mask = kButtonA1Mask | kButtonA2Mask;
 constexpr size_t kMaxRecordingSamples =
     inmp441_audio::kSampleRate * kMaxRecordingSeconds;
 constexpr size_t kPreRollSamples =
@@ -39,15 +43,14 @@ static_assert(kSpeechConfirmationMs > 80,
               "Button transients must not confirm speech");
 
 struct ButtonState {
-  bool rawPressed;
-  bool stablePressed;
+  uint8_t rawMask;
+  uint8_t stableMask;
   uint32_t rawChangedAt;
 };
 
 int16_t pcmBuffer[inmp441_audio::kMaxSamplesPerRead];
 int16_t preRollBuffer[kPreRollSamples];
-ButtonState buttonStates[kRegionCount] = {};
-uint32_t bothButtonsPressedAt = 0;
+ButtonState buttonState = {};
 bool initialized = false;
 EventCallback eventCallback = nullptr;
 
@@ -65,11 +68,11 @@ bool connectWifi() {
 }
 
 void showProvisioningStatus() {
-  emitRegionEvent(0, RegionEvent::Status, wifi_provisioning::kSetupApSsid);
-  char passwordPrompt[32];
-  snprintf(passwordPrompt, sizeof(passwordPrompt), "Pass: %s",
+  char prompt[80];
+  snprintf(prompt, sizeof(prompt), "WiFi: %s\nPass: %s\n\xE8\xBF\x9E\xE6\x8E\xA5\xE5\x90\x8E\xE9\x85\x8D\xE7\xBD\xAE",
+           wifi_provisioning::kSetupApSsid,
            wifi_provisioning::kSetupApPassword);
-  emitRegionEvent(1, RegionEvent::Status, passwordPrompt);
+  emitRegionEvent(ui_layout::kFunctionSlot, RegionEvent::Status, prompt);
 }
 
 bool writeAll(WiFiClient& client, const uint8_t* data, size_t size) {
@@ -189,8 +192,21 @@ bool readHttpResponse(WiFiClient& client, String& responseBody,
   return success;
 }
 
-bool buttonWasReleased(int buttonPin, uint32_t& releaseStartedAt) {
-  if (digitalRead(buttonPin) == LOW) {
+uint8_t readButtonMask() {
+  uint8_t mask = 0;
+  if (digitalRead(kButtonPins[0]) == LOW) mask |= kButtonA1Mask;
+  if (digitalRead(kButtonPins[1]) == LOW) mask |= kButtonA2Mask;
+  return mask;
+}
+
+uint8_t regionForButtonMask(uint8_t mask) {
+  if (mask == kButtonA1Mask) return 0;
+  if (mask == kButtonA2Mask) return 1;
+  return 2;
+}
+
+bool buttonWasReleased(uint8_t requiredMask, uint32_t& releaseStartedAt) {
+  if ((readButtonMask() & requiredMask) == requiredMask) {
     releaseStartedAt = 0;
     return false;
   }
@@ -198,7 +214,8 @@ bool buttonWasReleased(int buttonPin, uint32_t& releaseStartedAt) {
   return millis() - releaseStartedAt >= kButtonDebounceMs;
 }
 
-void handleButtonPress(uint8_t region, int buttonPin) {
+void handleButtonPress(uint8_t region, uint8_t requiredMask,
+                       uint32_t pressedAt) {
   if (!inmp441_audio::restartCapture()) {
     emitRegionEvent(region, RegionEvent::Error);
     return;
@@ -208,14 +225,8 @@ void handleButtonPress(uint8_t region, int buttonPin) {
   size_t voicedSamples = 0;
   bool localSpeechDetected = false;
   uint32_t releaseStartedAt = 0;
-  const uint32_t pressedAt = millis();
   while (millis() - pressedAt < kShortPressMs) {
-    if (digitalRead(kButtonPins[1U - region]) == LOW) {
-      bothButtonsPressedAt = millis();
-      Serial.println("A1+A2 chord detected; keep holding to open Wi-Fi setup.");
-      return;
-    }
-    if (buttonWasReleased(buttonPin, releaseStartedAt)) {
+    if (buttonWasReleased(requiredMask, releaseStartedAt)) {
       Serial.printf("Region %u short press: toggle completion.\n",
                     static_cast<unsigned>(region + 1));
       emitRegionEvent(region, RegionEvent::ToggleCompletion);
@@ -281,7 +292,7 @@ void handleButtonPress(uint8_t region, int buttonPin) {
   uint32_t nextProgressSecond = 1;
   releaseStartedAt = 0;
   while (samplesSent < kMaxRecordingSamples) {
-    if (buttonWasReleased(buttonPin, releaseStartedAt)) break;
+    if (buttonWasReleased(requiredMask, releaseStartedAt)) break;
 
     const size_t remaining = kMaxRecordingSamples - samplesSent;
     const size_t requested =
@@ -383,8 +394,8 @@ void handleButtonPress(uint8_t region, int buttonPin) {
 void setEventCallback(EventCallback callback) { eventCallback = callback; }
 
 bool begin() {
-  for (uint8_t region = 0; region < kRegionCount; ++region) {
-    pinMode(kButtonPins[region], INPUT_PULLUP);
+  for (uint8_t button = 0; button < kPhysicalButtonCount; ++button) {
+    pinMode(kButtonPins[button], INPUT_PULLUP);
   }
 
   if (!wifi_provisioning::begin(false, showProvisioningStatus)) {
@@ -397,15 +408,34 @@ bool begin() {
   }
   if (!inmp441_audio::begin()) return false;
 
-  for (uint8_t region = 0; region < kRegionCount; ++region) {
-    const bool pressed = digitalRead(kButtonPins[region]) == LOW;
-    buttonStates[region] = {pressed, pressed, millis()};
-  }
+  const uint8_t pressedMask = readButtonMask();
+  buttonState = {pressedMask, pressedMask, millis()};
 
   initialized = true;
   Serial.println(
-      "Voice recorder ready: hold D0 for the top region or D9 for the bottom region.");
+      "Voice recorder ready: D0 controls A1, D9 controls A2, and D0+D9 controls A3.");
   return true;
+}
+
+uint8_t detectChord(uint8_t initialMask) {
+  if (initialMask == kButtonA3Mask) return initialMask;
+
+  const uint32_t startedAt = millis();
+  uint32_t bothPressedAt = 0;
+  while (millis() - startedAt < kChordDetectionMs) {
+    const uint8_t currentMask = readButtonMask();
+    if ((currentMask & initialMask) == 0) return initialMask;
+    if (currentMask == kButtonA3Mask) {
+      if (bothPressedAt == 0) bothPressedAt = millis();
+      if (millis() - bothPressedAt >= kButtonDebounceMs) {
+        return kButtonA3Mask;
+      }
+    } else {
+      bothPressedAt = 0;
+    }
+    delay(5);
+  }
+  return initialMask;
 }
 
 void poll() {
@@ -415,43 +445,22 @@ void poll() {
     return;
   }
 
-  const bool bothButtonsPressed =
-      digitalRead(kButtonPins[0]) == LOW &&
-      digitalRead(kButtonPins[1]) == LOW;
-  if (bothButtonsPressed) {
-    if (bothButtonsPressedAt == 0) bothButtonsPressedAt = millis();
-    if (millis() - bothButtonsPressedAt >= kProvisioningGestureMs) {
-      Serial.println("A1+A2 held for two seconds; opening management mode.");
-      wifi_provisioning::begin(true, showProvisioningStatus);
-    }
-    delay(5);
-    return;
-  }
-  if (bothButtonsPressedAt != 0) {
-    bothButtonsPressedAt = 0;
-    for (uint8_t region = 0; region < kRegionCount; ++region) {
-      const bool pressed = digitalRead(kButtonPins[region]) == LOW;
-      buttonStates[region] = {pressed, pressed, millis()};
-    }
+  const uint8_t pressedMask = readButtonMask();
+  if (pressedMask != buttonState.rawMask) {
+    buttonState.rawMask = pressedMask;
+    buttonState.rawChangedAt = millis();
   }
 
-  for (uint8_t region = 0; region < kRegionCount; ++region) {
-    ButtonState& state = buttonStates[region];
-    const bool pressed = digitalRead(kButtonPins[region]) == LOW;
-    if (pressed != state.rawPressed) {
-      state.rawPressed = pressed;
-      state.rawChangedAt = millis();
-    }
-
-    if (state.stablePressed != state.rawPressed &&
-        millis() - state.rawChangedAt >= kButtonDebounceMs) {
-      state.stablePressed = state.rawPressed;
-      if (state.stablePressed) {
-        handleButtonPress(region, kButtonPins[region]);
-        state.rawPressed = digitalRead(kButtonPins[region]) == LOW;
-        state.stablePressed = state.rawPressed;
-        state.rawChangedAt = millis();
-      }
+  if (buttonState.stableMask != buttonState.rawMask &&
+      millis() - buttonState.rawChangedAt >= kButtonDebounceMs) {
+    buttonState.stableMask = buttonState.rawMask;
+    if (buttonState.stableMask != 0) {
+      const uint32_t pressedAt = buttonState.rawChangedAt;
+      const uint8_t actionMask = detectChord(buttonState.stableMask);
+      const uint8_t region = regionForButtonMask(actionMask);
+      handleButtonPress(region, actionMask, pressedAt);
+      const uint8_t currentMask = readButtonMask();
+      buttonState = {currentMask, currentMask, millis()};
     }
   }
   delay(5);

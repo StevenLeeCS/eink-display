@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from typing import Any, Mapping
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -88,7 +89,6 @@ class TaskRecord:
 
     time: str = ""
     place: str = ""
-    person: str = ""
     event: str = ""
     is_task: bool = True
     reason: str = ""
@@ -178,16 +178,44 @@ class BaiduSpeechClient:
         return results[0].strip()
 
 
+DISPLAY_COLUMNS_PER_LINE = 32
+TASK_LABEL_COLUMNS = 6
+TASK_FIELD_COLUMNS = DISPLAY_COLUMNS_PER_LINE - TASK_LABEL_COLUMNS
+
+
+def display_columns(text: str) -> int:
+    """Return 8-pixel columns used by the embedded 8/16-pixel fonts."""
+
+    columns = 0
+    for character in text:
+        if unicodedata.combining(character):
+            continue
+        columns += 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+    return columns
+
+
+def truncate_display_columns(text: str, maximum: int) -> str:
+    result: list[str] = []
+    columns = 0
+    for character in text.replace("\r", " ").replace("\n", " ").strip():
+        width = 0 if unicodedata.combining(character) else (
+            2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+        )
+        if columns + width > maximum:
+            break
+        result.append(character)
+        columns += width
+    return "".join(result).strip()
+
+
 def _task_from_mapping(value: Any) -> TaskRecord:
     if not isinstance(value, dict):
         raise CloudResponseError("structured task must be a JSON object")
     aliases = {
         "time": ("time", "时间"),
         "place": ("place", "地点"),
-        "person": ("person", "人物"),
         "event": ("event", "事情", "task"),
     }
-    limits = {"time": 32, "place": 32, "person": 32, "event": 96}
     fields: dict[str, str] = {}
     for name, names in aliases.items():
         item = next((value.get(alias) for alias in names if alias in value), "")
@@ -195,7 +223,7 @@ def _task_from_mapping(value: Any) -> TaskRecord:
             item = ""
         if not isinstance(item, str):
             raise CloudResponseError(f"task field {name!r} must be a string")
-        fields[name] = item.strip()[: limits[name]]
+        fields[name] = truncate_display_columns(item, TASK_FIELD_COLUMNS)
     raw_is_task = value.get("is_task")
     if raw_is_task is None:
         is_task = any(fields.values())
@@ -244,8 +272,10 @@ class DeepSeekClient:
         prompt = (
             "判断下面的中文语音转写是否是一项需要执行、提醒或记录完成状态的待办事项，"
             "并整理为 JSON。只输出 JSON 对象，字段必须是 is_task、time、place、"
-            "person、event、reason。is_task 必须为布尔值；纯陈述、闲聊、提问或无法执行的"
-            "内容设为 false。缺失字段填空字符串，不得编造信息。\n转写：" + transcript
+            "event、reason。is_task 必须为布尔值；纯陈述、闲聊、提问或无法执行的"
+            "内容设为 false。缺失字段填空字符串，不得编造信息。time、place、event"
+            "分别最多13个全角中文字符或26个半角字符，字段内不得换行，事情应简洁。\n转写："
+            + transcript
         )
         body = json.dumps(
             {
@@ -283,16 +313,22 @@ class DeepSeekClient:
 def format_task(record: TaskRecord, fallback: str = "") -> str:
     """Render fields in the stable Chinese order used by the e-paper UI."""
 
-    if not any((record.time, record.place, record.person, record.event)):
+    if not any((record.time, record.place, record.event)):
         return fallback.strip()
-    event = record.event or fallback.strip()
-    values = [record.time, record.place, record.person, event]
-    labels = ("时间", "地点", "人物", "事情")
+    event = record.event or truncate_display_columns(fallback, TASK_FIELD_COLUMNS)
+    values = [
+        truncate_display_columns(record.time, TASK_FIELD_COLUMNS),
+        truncate_display_columns(record.place, TASK_FIELD_COLUMNS),
+        truncate_display_columns(event, TASK_FIELD_COLUMNS),
+    ]
+    labels = ("时间", "地点", "事情")
     return "\n".join(f"{label}：{value or '-'}" for label, value in zip(labels, values))
 
 
 __all__ = [
     "BaiduConfig", "BaiduSpeechClient", "CloudConfigurationError",
     "CloudResponseError", "CloudServiceError", "DeepSeekClient", "DeepSeekConfig",
-    "TaskRecord", "format_task", "parse_task_json",
+    "DISPLAY_COLUMNS_PER_LINE", "TASK_FIELD_COLUMNS", "TaskRecord",
+    "display_columns", "format_task", "parse_task_json",
+    "truncate_display_columns",
 ]

@@ -5,7 +5,7 @@
 This project runs a voice-to-text task display on a Seeed Studio XIAO ESP32-C3,
 a ZJY420S08W0G01 4.2-inch 400x300 monochrome e-paper module, and an INMP441
 microphone. The panel is used clockwise in a logical 300x400 portrait layout,
-split into top and bottom task regions controlled by separate buttons. The old
+aligned to a case with four task openings and a fifth function opening. The old
 arbitrary-image display pipeline has been removed.
 
 The current remote revision is the completed Stage 0 baseline. Continue product
@@ -20,13 +20,17 @@ temporary PC recognition path incrementally.
 - Top button A1: D0/GPIO2 to GND.
 - Bottom button A2: D9/GPIO9 to GND.
 - Buttons use `INPUT_PULLUP` and are active low.
+- A1 controls task slot A1, A2 controls task slot A2, and pressing both together
+  controls task slot A3. A4 has no physical input in the current hardware stage.
 
 ## Current Behavior
 
-- Startup shows marker-free `A1` and `A2` voice prompts.
+- Startup shows marker-free `按住 A1-A4 输入` prompts for all four task slots,
+  and `欢迎使用电纸便利贴！` in the fixed function slot.
 - Rendering uses logical 300x400 portrait coordinates mapped onto the panel's
-  native 400x300 framebuffer with a 90-degree clockwise rotation. Each region
-  is 300x200 logical pixels.
+  native 400x300 framebuffer with a 90-degree clockwise rotation. The five
+  case openings use an 83-pixel pitch with about 69 visible pixels each. Every
+  task slot holds three 16-pixel text lines of at most 16 full-width characters.
 - Presses shorter than 500 ms toggle an existing result between incomplete
   (hollow square) and complete (filled square). Initial and prompt states have
   no marker.
@@ -38,15 +42,18 @@ temporary PC recognition path incrementally.
   that region without waiting for release.
 - Successful recognition replaces the selected region and starts incomplete.
 - First use opens an ESP-hosted phone management portal; Wi-Fi credentials are
-  verified and stored in project-specific NVS. Holding A1+A2 for two seconds
-  enters the same explicit management mode.
+  verified and stored in project-specific NVS. A failed saved-network connection
+  also returns to the AP portal because the A1+A2 gesture now belongs to A3.
+- Captive-portal probe paths and unknown AP-mode paths directly serve the admin
+  page without HTTP redirects. VPN/proxy/TUN software can still bypass the AP's
+  wildcard DNS; disable it during setup or open `http://192.168.4.1` directly.
 - The phone portal shows device status, scans/switches/forgets Wi-Fi, manages
   the recognition gateway host/port/path, and provides restart and exit
   controls. It remains available at the device's station-mode IP during normal
-  idle operation; the A1+A2 gesture additionally opens the isolated AP portal.
+  idle operation.
   Receiver settings are versioned in NVS and take precedence over compile-time
   defaults.
-- The portal has a task view for both active regions and the newest 30 completed
+- The portal has a task view for all four task regions and the newest 30 completed
   task records. Active task text/completion state and completed history survive
   restart in a versioned LittleFS record; history can be cleared independently.
 - Baidu speech and DeepSeek endpoint/key fields can be maintained from the API
@@ -54,7 +61,8 @@ temporary PC recognition path incrementally.
   by status APIs. These device-side values remain reserved until the firmware's
   direct-cloud adapter replaces the Python gateway.
 - The receiver can use local faster-whisper or Baidu STT, then optionally ask
-  DeepSeek for bounded `time/place/person/event` task fields.
+  DeepSeek for bounded `time/place/event` task fields. Output is capped to three
+  lines and 16 full-width characters per line before it reaches the device.
 - Non-task speech shows a marker-free prompt in an empty region. If the region
   already contains a task, its text and completion state are preserved.
 - No-speech and generic retry prompts have no marker. Technical errors remain
@@ -72,7 +80,7 @@ temporary PC recognition path incrementally.
   server, and the AP-mode phone management HTTP API.
 - `src/device_settings.cpp`: versioned NVS storage for runtime receiver
   and cloud API settings.
-- `src/task_store.cpp`: versioned LittleFS cache for two active tasks and the
+- `src/task_store.cpp`: versioned LittleFS cache for four active tasks and the
   30-entry completed-task ring.
 - `src/inmp441_audio.cpp`: INMP441 I2S initialization and PCM capture.
 - `src/ascii_font_16.cpp`, `src/chinese_font_16.cpp`: access embedded font data.
@@ -109,8 +117,8 @@ The target flow is:
    use, then reconnect automatically with saved credentials.
 2. Stream PCM while the button is held, finalize recognition on release, and
    pass the cloud transcript to DeepSeek.
-3. Normalize the result into a task record ordered by time, place, person and
-   event, then render it in the selected e-paper region.
+3. Normalize the result into a task record ordered by time, place and event,
+   then render it in the selected e-paper region.
 4. After the management backend exists, add completed-task history and local
    persistence so the backend can retrieve it.
 
@@ -151,7 +159,7 @@ prototype, but the production cloud API adapter will replace it.
    NVS/Preferences, reconnect automatically and provide a recoverable way to
    re-enter provisioning.
 2. DeepSeek and display: validate a bounded structured response containing
-   time, place, person and event, then render the result in the selected region.
+   time, place and event, then render the result in the selected region.
    Preserve readable transcript/task text when fields are absent or processing
    fails.
 3. Cloud STT integration: replace the PC/faster-whisper receiver with a cloud

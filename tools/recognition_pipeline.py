@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 import threading
 from typing import Any, Protocol
+import unicodedata
 import wave
 
 from cloud_services import (
     BaiduSpeechClient,
     CloudServiceError,
+    DISPLAY_COLUMNS_PER_LINE,
     DeepSeekClient,
     format_task,
 )
@@ -19,6 +21,7 @@ from cloud_services import (
 
 NO_SPEECH_PROMPT = "未识别到语音"
 NOT_TASK_PROMPT = "未识别到待办事项"
+DISPLAY_LINE_COUNT = 3
 
 PUNCTUATION_TRANSLATION = str.maketrans(
     {
@@ -47,6 +50,42 @@ class RecognitionResult:
     text: str
     speech_detected: bool
     task_detected: bool
+
+
+def fit_display_text(text: str) -> str:
+    """Wrap and cap output to the e-paper's three 32-column text lines."""
+
+    lines: list[str] = []
+    current: list[str] = []
+    columns = 0
+
+    def finish_line() -> bool:
+        nonlocal current, columns
+        lines.append("".join(current).strip())
+        current = []
+        columns = 0
+        return len(lines) >= DISPLAY_LINE_COUNT
+
+    for character in text.strip():
+        if character == "\r":
+            continue
+        if character == "\n":
+            if finish_line():
+                break
+            continue
+        width = 0 if unicodedata.combining(character) else (
+            2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+        )
+        if current and columns + width > DISPLAY_COLUMNS_PER_LINE:
+            if finish_line():
+                break
+        if columns + width <= DISPLAY_COLUMNS_PER_LINE:
+            current.append(character)
+            columns += width
+
+    if current and len(lines) < DISPLAY_LINE_COUNT:
+        lines.append("".join(current).strip())
+    return "\n".join(line for line in lines if line)
 
 
 def structure_for_display(
@@ -109,6 +148,7 @@ class RecognitionPipeline:
             elif self.converter is not None:
                 display_text = self.converter.convert(display_text)
             display_text = display_text.translate(PUNCTUATION_TRANSLATION)
+            display_text = fit_display_text(display_text)
 
             return RecognitionResult(
                 text=display_text,
@@ -142,5 +182,6 @@ __all__ = [
     "NO_SPEECH_PROMPT",
     "RecognitionPipeline",
     "RecognitionResult",
+    "fit_display_text",
     "structure_for_display",
 ]

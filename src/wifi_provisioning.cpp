@@ -188,26 +188,19 @@ bool connectStation(const String& ssid, const String& password) {
   return true;
 }
 
-void sendPortalRedirect(WebServer& server) {
-  server.sendHeader("Cache-Control", "no-store");
-  server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(),
-                    true);
-  server.send(302, "text/plain", "");
-}
-
-void sendNotFound(WebServer& server) {
-  if (captivePortalMode) {
-    sendPortalRedirect(server);
-    return;
-  }
-  sendJson(server, 404, F("{\"ok\":false,\"message\":\"Not found\"}"));
-}
-
 void sendAdminPage(WebServer& server) {
   const size_t length =
       static_cast<size_t>(admin_html_end - admin_html_start);
   server.send_P(200, PSTR("text/html; charset=utf-8"),
                 reinterpret_cast<PGM_P>(admin_html_start), length);
+}
+
+void sendNotFound(WebServer& server) {
+  if (captivePortalMode) {
+    sendAdminPage(server);
+    return;
+  }
+  sendJson(server, 404, F("{\"ok\":false,\"message\":\"Not found\"}"));
 }
 
 void registerStatusRoutes(WebServer& server) {
@@ -446,13 +439,13 @@ void startAdminServer() {
   registerConfigurationRoutes(adminServer);
   registerSystemRoutes(adminServer);
   adminServer.on("/generate_204", HTTP_ANY,
-                 []() { sendNotFound(adminServer); });
+                 []() { sendAdminPage(adminServer); });
   adminServer.on("/hotspot-detect.html", HTTP_ANY,
-                 []() { sendNotFound(adminServer); });
+                 []() { sendAdminPage(adminServer); });
   adminServer.on("/connecttest.txt", HTTP_ANY,
-                 []() { sendNotFound(adminServer); });
+                 []() { sendAdminPage(adminServer); });
   adminServer.on("/ncsi.txt", HTTP_ANY,
-                 []() { sendNotFound(adminServer); });
+                 []() { sendAdminPage(adminServer); });
   adminServer.onNotFound([]() { sendNotFound(adminServer); });
   adminServer.begin();
   adminServerStarted = true;
@@ -501,7 +494,7 @@ bool begin(bool forcePortal, PortalStartedCallback portalStarted) {
   device_settings::begin();
   loadCredentials();
   if (forcePortal) {
-    Serial.println("Management mode requested by the A1+A2 hold gesture.");
+    Serial.println("Explicit management mode requested.");
     return startPortal(portalStarted);
   }
 

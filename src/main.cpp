@@ -5,6 +5,7 @@
 #include "ascii_font_16.h"
 #include "chinese_font_16.h"
 #include "task_store.h"
+#include "ui_layout.h"
 #include "voice_upload.h"
 
 namespace {
@@ -29,20 +30,25 @@ constexpr int kPinBusy = 6;   // D4, HIGH while SSD1683 is busy
 
 constexpr uint32_t kSpiFrequency = 4000000;
 constexpr uint32_t kBusyTimeoutMs = 30000;
-constexpr uint8_t kVoiceRegionCount = 2;
-constexpr uint16_t kVoiceRegionHeight = kDisplayHeight / kVoiceRegionCount;
-constexpr uint16_t kVoiceDividerY = kVoiceRegionHeight - 1;
-constexpr uint16_t kVoiceMarkerX = 12;
-constexpr uint16_t kVoiceMarkerSize = 12;
-constexpr uint16_t kVoiceMarkerGap = 8;
-constexpr uint16_t kVoiceTextX =
-    kVoiceMarkerX + kVoiceMarkerSize + kVoiceMarkerGap;
-constexpr uint16_t kVoiceTextTopPadding = 10;
-constexpr uint16_t kVoiceTextWidth = kDisplayWidth - kVoiceTextX - 16;
-constexpr uint16_t kVoiceTextHeight =
-    kVoiceRegionHeight - 2 * kVoiceTextTopPadding;
-constexpr uint16_t kVoiceLineHeight = 20;
+constexpr uint16_t kSlotPitch = 83;
+constexpr uint16_t kSlotVisibleHeight = 69;
+constexpr uint16_t kTaskMarkerX = 12;
+constexpr uint16_t kTaskMarkerSize = 12;
+constexpr uint16_t kTaskMarkerGap = 8;
+constexpr uint16_t kTaskTextX =
+    kTaskMarkerX + kTaskMarkerSize + kTaskMarkerGap;
+constexpr uint16_t kSlotTextTopPadding = 6;
+constexpr uint16_t kTaskTextWidth = kDisplayWidth - kTaskTextX - 12;
+constexpr uint16_t kSlotTextHeight = 56;
+constexpr uint16_t kTextLineHeight = 20;
+constexpr uint32_t kFullWidthExclamation = 0xFF01;
 constexpr uint8_t kPartialRefreshesBeforeFull = 4;
+
+static_assert(kTaskTextWidth / font16::kGlyphWidth ==
+                  ui_layout::kFullWidthCharactersPerLine,
+              "Task width must match the server display contract");
+static_assert(kSlotTextTopPadding + kSlotTextHeight <= kSlotVisibleHeight,
+              "Three text lines must fit inside one case opening");
 
 class Epd42 {
  public:
@@ -192,10 +198,10 @@ Epd42 display;
 uint8_t framebuffer[kFrameBytes];
 bool voiceDisplayReady = false;
 uint8_t voicePartialRefreshes = 0;
-bool regionCompleted[kVoiceRegionCount] = {false, false};
-bool regionHasResult[kVoiceRegionCount] = {false, false};
-uint16_t regionMarkerX[kVoiceRegionCount] = {};
-uint16_t regionMarkerY[kVoiceRegionCount] = {};
+bool regionCompleted[ui_layout::kTaskRegionCount] = {};
+bool regionHasResult[ui_layout::kTaskRegionCount] = {};
+uint16_t regionMarkerX[ui_layout::kTaskRegionCount] = {};
+uint16_t regionMarkerY[ui_layout::kTaskRegionCount] = {};
 
 void setPixel(uint16_t x, uint16_t y, bool black) {
   if (x >= kDisplayWidth || y >= kDisplayHeight) return;
@@ -250,6 +256,7 @@ bool drawChineseGlyph16(uint16_t x, uint16_t y, uint32_t codepoint) {
 }
 
 uint16_t glyphWidth16(uint32_t codepoint) {
+  if (codepoint == kFullWidthExclamation) return ascii16::kGlyphWidth;
   if (codepoint >= ascii16::kFirstCodepoint &&
       codepoint <= ascii16::kLastCodepoint) {
     return ascii16::kGlyphWidth;
@@ -259,6 +266,9 @@ uint16_t glyphWidth16(uint32_t codepoint) {
 }
 
 bool drawCodepoint16(uint16_t x, uint16_t y, uint32_t codepoint) {
+  if (codepoint == kFullWidthExclamation) {
+    return drawAsciiGlyph16(x, y, '!');
+  }
   if (codepoint >= ascii16::kFirstCodepoint &&
       codepoint <= ascii16::kLastCodepoint) {
     return drawAsciiGlyph16(x, y, codepoint);
@@ -337,14 +347,14 @@ bool drawWrappedText16(uint16_t x, uint16_t y, uint16_t width,
     if (codepoint == '\r') continue;
     if (codepoint == '\n') {
       cursorX = x;
-      cursorY += kVoiceLineHeight;
+      cursorY += kTextLineHeight;
       continue;
     }
 
     const uint16_t glyphWidth = glyphWidth16(codepoint);
     if (cursorX + glyphWidth > right) {
       cursorX = x;
-      cursorY += kVoiceLineHeight;
+      cursorY += kTextLineHeight;
     }
     if (cursorY + font16::kGlyphHeight > bottom) break;
 
@@ -354,63 +364,117 @@ bool drawWrappedText16(uint16_t x, uint16_t y, uint16_t width,
   return drewGlyph;
 }
 
-void drawVoiceDivider() {
-  for (uint16_t x = 0; x < kDisplayWidth; ++x) {
-    setPixel(x, kVoiceDividerY, true);
-  }
+uint16_t slotTop(uint8_t slot) {
+  return static_cast<uint16_t>(slot) * kSlotPitch;
 }
 
-void clearVoiceRegion(uint8_t region) {
-  const uint16_t yStart = region * kVoiceRegionHeight;
-  const uint16_t yEnd = yStart + kVoiceRegionHeight;
+void clearDisplaySlot(uint8_t slot) {
+  const uint16_t yStart = slotTop(slot);
+  const uint16_t yEnd =
+      slot + 1 < ui_layout::kDisplaySlotCount ? slotTop(slot + 1)
+                                              : kDisplayHeight;
   for (uint16_t y = yStart; y < yEnd; ++y) {
     for (uint16_t x = 0; x < kDisplayWidth; ++x) {
       setPixel(x, y, false);
     }
   }
-  drawVoiceDivider();
+}
+
+void drawSlotDividers() {
+  for (uint8_t slot = 0; slot + 1 < ui_layout::kDisplaySlotCount; ++slot) {
+    const uint16_t dividerY = slotTop(slot) + kSlotVisibleHeight - 1;
+    for (uint16_t x = 0; x < kDisplayWidth; ++x) {
+      setPixel(x, dividerY, true);
+    }
+  }
 }
 
 void drawCompletionMarker(uint16_t x, uint16_t y, bool completed) {
-  for (uint16_t row = 0; row < kVoiceMarkerSize; ++row) {
-    for (uint16_t column = 0; column < kVoiceMarkerSize; ++column) {
-      const bool border = row < 2 || row >= kVoiceMarkerSize - 2 ||
-                          column < 2 || column >= kVoiceMarkerSize - 2;
+  for (uint16_t row = 0; row < kTaskMarkerSize; ++row) {
+    for (uint16_t column = 0; column < kTaskMarkerSize; ++column) {
+      const bool border = row < 2 || row >= kTaskMarkerSize - 2 ||
+                          column < 2 || column >= kTaskMarkerSize - 2;
       setPixel(x + column, y + row, completed || border);
     }
   }
 }
 
-bool drawMarkerFreeRegion(uint8_t region, const char* text) {
-  if (region >= kVoiceRegionCount || text == nullptr || *text == '\0') {
+bool drawCenteredSlotText(uint8_t slot, const char* text) {
+  if (slot >= ui_layout::kDisplaySlotCount || text == nullptr ||
+      *text == '\0') {
     return false;
   }
 
-  clearVoiceRegion(region);
-  uint16_t textWidth = 0;
-  if (!measureText16(text, textWidth)) return false;
-  const uint16_t textX = (kDisplayWidth - textWidth) / 2;
-  const uint16_t textY = region * kVoiceRegionHeight +
-                         (kVoiceRegionHeight - font16::kGlyphHeight) / 2;
+  String lines[ui_layout::kLinesPerSlot];
+  uint8_t lineCount = 0;
+  const char* lineStart = text;
+  for (const char* cursor = text;; ++cursor) {
+    if (*cursor != '\n' && *cursor != '\0') continue;
+    if (lineCount >= ui_layout::kLinesPerSlot) return false;
+    lines[lineCount++] = String(lineStart).substring(0, cursor - lineStart);
+    if (*cursor == '\0') break;
+    lineStart = cursor + 1;
+  }
 
+  clearDisplaySlot(slot);
+  drawSlotDividers();
+  const uint16_t blockHeight = font16::kGlyphHeight +
+      static_cast<uint16_t>(lineCount - 1) * kTextLineHeight;
+  const uint16_t firstY = slotTop(slot) +
+      (kSlotVisibleHeight - blockHeight) / 2;
+  bool drewText = false;
+  for (uint8_t line = 0; line < lineCount; ++line) {
+    uint16_t textWidth = 0;
+    if (!measureText16(lines[line].c_str(), textWidth) ||
+        textWidth > kDisplayWidth) {
+      return false;
+    }
+    const uint16_t textX = (kDisplayWidth - textWidth) / 2;
+    if (!drawText16(textX, firstY + line * kTextLineHeight,
+                    lines[line].c_str())) {
+      return false;
+    }
+    drewText = true;
+  }
+  return drewText;
+}
+
+bool drawMarkerFreeTaskRegion(uint8_t region, const char* text) {
+  if (region >= ui_layout::kTaskRegionCount) return false;
   regionCompleted[region] = false;
   regionHasResult[region] = false;
-  return drawText16(textX, textY, text);
+  return drawCenteredSlotText(region, text);
 }
 
 bool drawInitialRegion(uint8_t region) {
-  const char* prompt = region == 0 ? u8"\u6309\u4F4F A1 \u8F93\u5165"
-                                   : u8"\u6309\u4F4F A2 \u8F93\u5165";
-  return drawMarkerFreeRegion(region, prompt);
+  if (region >= ui_layout::kTaskRegionCount) return false;
+  constexpr const char* kPrompts[ui_layout::kTaskRegionCount] = {
+      u8"\u6309\u4F4F A1 \u8F93\u5165",
+      u8"\u6309\u4F4F A2 \u8F93\u5165",
+      u8"\u6309\u4F4F A3 \u8F93\u5165",
+      u8"\u6309\u4F4F A4 \u8F93\u5165",
+  };
+  regionCompleted[region] = false;
+  regionHasResult[region] = false;
+  return drawCenteredSlotText(region, kPrompts[region]);
 }
 
-bool drawInitialVoicePrompt() {
-  drawVoiceDivider();
-  return drawInitialRegion(0) && drawInitialRegion(1);
+bool drawFunctionDefault() {
+  return drawCenteredSlotText(
+      ui_layout::kFunctionSlot,
+      u8"\u6B22\u8FCE\u4F7F\u7528\u7535\u7EB8\u4FBF\u5229\u8D34\uFF01");
 }
 
-bool refreshVoiceRegion(uint8_t region) {
-  if (region >= kVoiceRegionCount) return false;
+bool drawInitialDisplay() {
+  bool rendered = true;
+  for (uint8_t region = 0; region < ui_layout::kTaskRegionCount; ++region) {
+    rendered = drawInitialRegion(region) && rendered;
+  }
+  return drawFunctionDefault() && rendered;
+}
+
+bool refreshDisplaySlot(uint8_t slot) {
+  if (slot >= ui_layout::kDisplaySlotCount) return false;
 
   if (voicePartialRefreshes >= kPartialRefreshesBeforeFull) {
     Serial.println("Performing periodic full refresh.");
@@ -419,34 +483,35 @@ bool refreshVoiceRegion(uint8_t region) {
     return refreshed;
   }
 
-  Serial.printf("Differential refresh for logical region %u.\n", region + 1);
+  Serial.printf("Differential refresh for logical slot %u.\n", slot + 1);
   const bool refreshed = display.displayPartial(framebuffer);
   if (refreshed) ++voicePartialRefreshes;
   return refreshed;
 }
 
 bool drawRecognitionRegion(uint8_t region, const char* text) {
-  clearVoiceRegion(region);
+  if (region >= ui_layout::kTaskRegionCount) return false;
+  clearDisplaySlot(region);
+  drawSlotDividers();
   regionCompleted[region] = false;
   regionHasResult[region] = true;
-  regionMarkerX[region] = kVoiceMarkerX;
-  const uint16_t textY =
-      region * kVoiceRegionHeight + kVoiceTextTopPadding;
+  regionMarkerX[region] = kTaskMarkerX;
+  const uint16_t textY = slotTop(region) + kSlotTextTopPadding;
   regionMarkerY[region] =
-      textY + (font16::kGlyphHeight - kVoiceMarkerSize) / 2;
+      textY + (font16::kGlyphHeight - kTaskMarkerSize) / 2;
   drawCompletionMarker(regionMarkerX[region], regionMarkerY[region], false);
 
   const char* visibleText =
       text != nullptr && *text != '\0'
           ? text
           : u8"\u672A\u8BC6\u522B\u5230\u8BED\u97F3";
-  return drawWrappedText16(kVoiceTextX, textY, kVoiceTextWidth,
-                           kVoiceTextHeight, visibleText);
+  return drawWrappedText16(kTaskTextX, textY, kTaskTextWidth,
+                           kSlotTextHeight, visibleText);
 }
 
 void restoreCachedTasks() {
   if (!task_store::ready()) return;
-  for (uint8_t region = 0; region < kVoiceRegionCount; ++region) {
+  for (uint8_t region = 0; region < ui_layout::kTaskRegionCount; ++region) {
     task_store::CurrentTask task = {};
     if (!task_store::getCurrent(region, task) || !task.present) continue;
     if (!drawRecognitionRegion(region, task.text)) {
@@ -475,7 +540,18 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
     Serial.println("ERROR: Display is not ready for region updates.");
     return;
   }
-  if (region >= kVoiceRegionCount) {
+  if (event == voice_upload::RegionEvent::Status) {
+    if (region != ui_layout::kFunctionSlot ||
+        !drawCenteredSlotText(region, text)) {
+      Serial.println("ERROR: Function status could not be rendered.");
+      return;
+    }
+    const bool refreshed = refreshDisplaySlot(region);
+    Serial.println(refreshed ? "Function status displayed."
+                             : "ERROR: Display refresh failed.");
+    return;
+  }
+  if (region >= ui_layout::kTaskRegionCount) {
     Serial.println("ERROR: Invalid display region.");
     return;
   }
@@ -491,7 +567,7 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
       }
       break;
     case voice_upload::RegionEvent::NoSpeech:
-      if (!drawMarkerFreeRegion(
+      if (!drawMarkerFreeTaskRegion(
               region, u8"\u672A\u8BC6\u522B\u5230\u8BED\u97F3")) {
         Serial.println("ERROR: No-speech prompt could not be rendered.");
         return;
@@ -503,7 +579,7 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         Serial.println("Non-task speech ignored; existing region preserved.");
         return;
       }
-      if (!drawMarkerFreeRegion(
+      if (!drawMarkerFreeTaskRegion(
               region, u8"\u672A\u8BC6\u522B\u5230\u5F85\u529E\u4E8B\u9879")) {
         Serial.println("ERROR: Non-task prompt could not be rendered.");
         return;
@@ -529,13 +605,10 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
       clearCachedTask(region);
       break;
     case voice_upload::RegionEvent::Status:
-      if (!drawMarkerFreeRegion(region, text)) {
-        Serial.println("ERROR: Status text could not be rendered.");
-        return;
-      }
+      // Function-slot status is handled before task-region validation.
       break;
     case voice_upload::RegionEvent::Error:
-      if (!drawMarkerFreeRegion(
+      if (!drawMarkerFreeTaskRegion(
               region, u8"\u64CD\u4F5C\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5")) {
         Serial.println("ERROR: Generic error prompt could not be rendered.");
         return;
@@ -544,7 +617,7 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
       break;
   }
 
-  const bool refreshed = refreshVoiceRegion(region);
+  const bool refreshed = refreshDisplaySlot(region);
   Serial.println(refreshed ? "Region update displayed."
                            : "ERROR: Display refresh failed.");
 }
@@ -560,8 +633,8 @@ void setup() {
   if (!task_store::begin()) {
     Serial.println("ERROR: Task cache is unavailable.");
   }
-  if (!drawInitialVoicePrompt()) {
-    Serial.println("ERROR: Initial voice prompt could not be rendered.");
+  if (!drawInitialDisplay()) {
+    Serial.println("ERROR: Initial five-slot display could not be rendered.");
   }
   restoreCachedTasks();
   const bool displayInitialized = display.begin() && display.display(framebuffer);

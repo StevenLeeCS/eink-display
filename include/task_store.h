@@ -3,9 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ui_layout.h"
+
 namespace task_store {
 
-constexpr uint8_t kRegionCount = 2;
+constexpr uint8_t kRegionCount = ui_layout::kTaskRegionCount;
 constexpr size_t kHistoryCapacity = 30;
 constexpr size_t kTextCapacity = 384;
 
