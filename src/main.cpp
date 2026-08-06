@@ -558,11 +558,14 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
 
   switch (event) {
     case voice_upload::RegionEvent::Recognition:
+    case voice_upload::RegionEvent::RecognitionNoHistory:
       if (!drawRecognitionRegion(region, text)) {
         Serial.println("ERROR: Recognition text could not be rendered.");
         return;
       }
-      if (!task_store::setCurrent(region, text)) {
+      if (!task_store::setCurrent(
+              region, text,
+              event == voice_upload::RegionEvent::Recognition)) {
         Serial.println("ERROR: Recognition task could not be cached.");
       }
       break;
@@ -573,17 +576,6 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         return;
       }
       clearCachedTask(region);
-      break;
-    case voice_upload::RegionEvent::NotTask:
-      if (regionHasResult[region]) {
-        Serial.println("Non-task speech ignored; existing region preserved.");
-        return;
-      }
-      if (!drawMarkerFreeTaskRegion(
-              region, u8"\u672A\u8BC6\u522B\u5230\u5F85\u529E\u4E8B\u9879")) {
-        Serial.println("ERROR: Non-task prompt could not be rendered.");
-        return;
-      }
       break;
     case voice_upload::RegionEvent::ToggleCompletion:
       if (!regionHasResult[region]) {

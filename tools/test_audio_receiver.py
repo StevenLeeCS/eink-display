@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-from io import BytesIO
+from contextlib import redirect_stdout
+from io import BytesIO, StringIO
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -9,12 +10,14 @@ from audio_receiver import (
     AudioTooLargeError,
     AudioUploadError,
     copy_chunked_audio,
+    should_retain_recording,
     speech_detection_header,
     task_detection_header,
 )
-from cloud_services import CloudServiceError, TaskRecord
+from cloud_services import CloudServiceError, TaskRecord, display_columns
 from recognition_pipeline import (
     RecognitionPipeline,
+    RecognitionResult,
     fit_display_text,
     structure_for_display,
 )
@@ -60,6 +63,19 @@ class ChunkedAudioTest(unittest.TestCase):
         self.assertEqual("1", task_detection_header(True))
         self.assertEqual("0", task_detection_header(False))
 
+    def test_failed_audio_retention_is_explicit_and_selective(self) -> None:
+        task = RecognitionResult("任务", True, True)
+        not_task = RecognitionResult("未识别到待办事项", True, False)
+        no_speech = RecognitionResult("未识别到语音", False, False)
+
+        self.assertFalse(should_retain_recording(False, not_task))
+        self.assertFalse(should_retain_recording(True, task))
+        self.assertTrue(should_retain_recording(True, not_task))
+        self.assertTrue(should_retain_recording(True, no_speech))
+        self.assertTrue(
+            should_retain_recording(True, None, recognition_failed=True)
+        )
+
     def test_deepseek_client_contract_is_used(self) -> None:
         class FakeDeepSeekClient:
             def structure_transcript(self, transcript: str) -> TaskRecord:
@@ -76,7 +92,7 @@ class ChunkedAudioTest(unittest.TestCase):
         self.assertIn("时间：今天", displayed)
         self.assertIn("事情：学习嵌入式开发", displayed)
 
-    def test_non_task_returns_marker_free_prompt(self) -> None:
+    def test_non_task_returns_normal_task_display_structure(self) -> None:
         class FakeDeepSeekClient:
             def structure_transcript(self, transcript: str) -> TaskRecord:
                 return TaskRecord(is_task=False, reason="只是闲聊")
@@ -86,7 +102,10 @@ class ChunkedAudioTest(unittest.TestCase):
         )
 
         self.assertFalse(task_detected)
-        self.assertEqual("未识别到待办事项", displayed)
+        self.assertEqual(
+            "时间：-\n地点：-\n事情：[未识别到待办事项,请重试]",
+            displayed,
+        )
 
 
 class RecognitionPipelineTest(unittest.TestCase):
@@ -129,6 +148,68 @@ class RecognitionPipelineTest(unittest.TestCase):
 
         self.assertEqual("今天学习嵌入式开发", result.text)
         self.assertTrue(result.speech_detected)
+        self.assertTrue(result.task_detected)
+
+    def test_non_task_pipeline_uses_supported_punctuation_and_fits(self) -> None:
+        class FakeTranscriber:
+            def transcribe(
+                self, *args: object, **kwargs: object
+            ) -> tuple[list[object], object]:
+                return [SimpleNamespace(text="今天天气不错")], object()
+
+        class FakeDeepSeekClient:
+            def structure_transcript(self, transcript: str) -> TaskRecord:
+                return TaskRecord(is_task=False, reason="闲聊")
+
+        pipeline = RecognitionPipeline(
+            "local",
+            transcriber=FakeTranscriber(),
+            deepseek_client=FakeDeepSeekClient(),  # type: ignore[arg-type]
+        )
+
+        result = pipeline.recognize(Path("unused.wav"))
+
+        self.assertEqual(
+            "时间:-\n地点:-\n事情:[未识别到待办事项,请重试]",
+            result.text,
+        )
+        self.assertFalse(result.task_detected)
+        self.assertTrue(
+            all(display_columns(line) <= 32 for line in result.text.splitlines())
+        )
+
+    def test_debug_log_separates_transcript_and_task_decision(self) -> None:
+        class FakeTranscriber:
+            def transcribe(
+                self, *args: object, **kwargs: object
+            ) -> tuple[list[object], object]:
+                return [SimpleNamespace(text="回家要吃饭")], object()
+
+        class FakeDeepSeekClient:
+            def structure_transcript(self, transcript: str) -> TaskRecord:
+                return TaskRecord(
+                    time="",
+                    place="家",
+                    event="吃饭",
+                    is_task=True,
+                    reason="未来行动意图",
+                )
+
+        pipeline = RecognitionPipeline(
+            "local",
+            transcriber=FakeTranscriber(),
+            deepseek_client=FakeDeepSeekClient(),  # type: ignore[arg-type]
+            debug=True,
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            result = pipeline.recognize(Path("unused.wav"), request_id="case-1")
+
+        log = output.getvalue()
+        self.assertIn("[recognition:case-1] transcript=回家要吃饭", log)
+        self.assertIn('"is_task": true', log)
+        self.assertIn('"reason": "未来行动意图"', log)
         self.assertTrue(result.task_detected)
 
 

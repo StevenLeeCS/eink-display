@@ -372,13 +372,14 @@ void handleButtonPress(uint8_t region, uint8_t requiredMask,
       emitRegionEvent(region, RegionEvent::Reset);
     } else if (!speechDetected) {
       emitRegionEvent(region, RegionEvent::NoSpeech);
-    } else if (!taskDetected) {
-      emitRegionEvent(region, RegionEvent::NotTask);
     } else {
       const task_processing::TaskRecord task =
           task_processing::fromRecognition(recognizedText);
       const String displayText = task_processing::textForDisplay(task);
-      emitRegionEvent(region, RegionEvent::Recognition,
+      const RegionEvent resultEvent =
+          taskDetected ? RegionEvent::Recognition
+                       : RegionEvent::RecognitionNoHistory;
+      emitRegionEvent(region, resultEvent,
                       displayText.c_str());
     }
     Serial.println("Press and hold a region button to record again.");

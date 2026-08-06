@@ -279,6 +279,8 @@ void registerStatusRoutes(WebServer& server) {
       response += task.present ? F("true") : F("false");
       response += F(",\"completed\":");
       response += task.completed ? F("true") : F("false");
+      response += F(",\"history_eligible\":");
+      response += task.historyEligible ? F("true") : F("false");
       response += F(",\"text\":\"");
       response += jsonEscape(task.text);
       response += F("\"}");

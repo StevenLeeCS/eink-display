@@ -14,6 +14,8 @@ constexpr size_t kTextCapacity = 384;
 struct CurrentTask {
   bool present;
   bool completed;
+  bool historyEligible;
+  uint32_t completionHistorySequence;
   char text[kTextCapacity];
 };
 
@@ -26,7 +28,8 @@ struct CompletedTask {
 bool begin();
 bool ready();
 bool getCurrent(uint8_t region, CurrentTask& task);
-bool setCurrent(uint8_t region, const char* text);
+bool setCurrent(uint8_t region, const char* text,
+                bool historyEligible = true);
 bool setCompleted(uint8_t region, bool completed);
 bool clearCurrent(uint8_t region);
 size_t completedCount();

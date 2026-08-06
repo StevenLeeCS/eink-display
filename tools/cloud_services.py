@@ -208,6 +208,30 @@ def truncate_display_columns(text: str, maximum: int) -> str:
     return "".join(result).strip()
 
 
+_SPOKEN_TIME_EQUIVALENTS = {
+    "一会": "稍后",
+    "一会儿": "稍后",
+    "待会": "稍后",
+    "待会儿": "稍后",
+    "等会": "稍后",
+    "等会儿": "稍后",
+    "等下": "稍后",
+    "等一下": "稍后",
+    "今天晚上": "今晚",
+    "下班以后": "下班后",
+    "下班之后": "下班后",
+    "有空": "有空时",
+    "抽空": "有空时",
+}
+
+
+def normalize_time_text(text: str) -> str:
+    """Convert common spoken relative times without inventing a clock time."""
+
+    value = text.strip()
+    return _SPOKEN_TIME_EQUIVALENTS.get(value, value)
+
+
 def _task_from_mapping(value: Any) -> TaskRecord:
     if not isinstance(value, dict):
         raise CloudResponseError("structured task must be a JSON object")
@@ -224,6 +248,7 @@ def _task_from_mapping(value: Any) -> TaskRecord:
         if not isinstance(item, str):
             raise CloudResponseError(f"task field {name!r} must be a string")
         fields[name] = truncate_display_columns(item, TASK_FIELD_COLUMNS)
+    fields["time"] = normalize_time_text(fields["time"])
     raw_is_task = value.get("is_task")
     if raw_is_task is None:
         is_task = any(fields.values())
@@ -271,10 +296,24 @@ class DeepSeekClient:
         key = _require(self.config.api_key, "DEEPSEEK_API_KEY")
         prompt = (
             "判断下面的中文语音转写是否是一项需要执行、提醒或记录完成状态的待办事项，"
-            "并整理为 JSON。只输出 JSON 对象，字段必须是 is_task、time、place、"
-            "event、reason。is_task 必须为布尔值；纯陈述、闲聊、提问或无法执行的"
-            "内容设为 false。缺失字段填空字符串，不得编造信息。time、place、event"
-            "分别最多13个全角中文字符或26个半角字符，字段内不得换行，事情应简洁。\n转写："
+            "并整理为 JSON。第一人称的未来计划、意图或义务，即使采用陈述句表达，"
+            "也属于待办；省略主语但包含未来可执行动作的短句也属于待办。已经完成的"
+            "过去事实、单纯状态、闲聊、提问或无法执行的内容不属于待办。无法确定但"
+            "包含明确可执行动作时，优先按待办处理，避免漏记。只输出 JSON 对象，字段"
+            "必须是 is_task、time、place、event、reason，is_task 必须为布尔值。"
+            "缺失字段填空字符串，不得编造信息。把不改变含义的口语改为简洁书面表达，"
+            "例如‘一会儿、待会儿、等一下’写为‘稍后’，但不得把相对时间编造成具体"
+            "钟点。time、place、event 分别最多13个全角中文字符或26个半角字符，"
+            "字段内不得换行。事情字段去掉‘我要、得、记得、一下’等口语框架，保留"
+            "动作、对象和必要限定。\n"
+            "示例：‘回家要吃饭’=>{\"is_task\":true,\"time\":\"\","
+            "\"place\":\"家\",\"event\":\"吃饭\",\"reason\":\"未来行动意图\"}；"
+            "‘一会儿要去修手机’=>{\"is_task\":true,\"time\":\"稍后\","
+            "\"place\":\"\",\"event\":\"维修手机\",\"reason\":\"未来行动意图\"}；"
+            "‘我已经吃过饭了’=>{\"is_task\":false,\"time\":\"\","
+            "\"place\":\"\",\"event\":\"\",\"reason\":\"已完成的事实\"}；"
+            "‘手机坏了’=>{\"is_task\":false,\"time\":\"\",\"place\":\"\","
+            "\"event\":\"\",\"reason\":\"单纯状态\"}。\n转写："
             + transcript
         )
         body = json.dumps(
@@ -329,6 +368,6 @@ __all__ = [
     "BaiduConfig", "BaiduSpeechClient", "CloudConfigurationError",
     "CloudResponseError", "CloudServiceError", "DeepSeekClient", "DeepSeekConfig",
     "DISPLAY_COLUMNS_PER_LINE", "TASK_FIELD_COLUMNS", "TaskRecord",
-    "display_columns", "format_task", "parse_task_json",
+    "display_columns", "format_task", "normalize_time_text", "parse_task_json",
     "truncate_display_columns",
 ]

@@ -31,7 +31,7 @@ from cloud_services import (
     DeepSeekConfig,
     DeepSeekClient,
 )
-from recognition_pipeline import RecognitionPipeline
+from recognition_pipeline import RecognitionPipeline, RecognitionResult
 
 
 MAX_RECORDING_SECONDS = 60
@@ -53,6 +53,39 @@ def speech_detection_header(speech_detected: bool) -> str:
 
 def task_detection_header(task_detected: bool) -> str:
     return "1" if task_detected else "0"
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    fallback = "true" if default else "false"
+    value = os.environ.get(name, fallback).strip().lower()
+    return value in {"1", "true", "yes"}
+
+
+def should_retain_recording(
+    keep_failed_audio: bool,
+    result: RecognitionResult | None,
+    *,
+    recognition_failed: bool = False,
+) -> bool:
+    if not keep_failed_audio:
+        return False
+    return (
+        recognition_failed
+        or result is None
+        or not result.speech_detected
+        or not result.task_detected
+    )
+
+
+def finalize_recording(path: Path, retain: bool) -> None:
+    if retain:
+        print(f"Retained diagnostic recording: {path}", flush=True)
+        return
+    try:
+        path.unlink(missing_ok=True)
+        print(f"Deleted temporary recording: {path.name}", flush=True)
+    except OSError as error:
+        print(f"WARNING: Could not delete {path.name}: {error}", flush=True)
 
 
 def _read_exact(stream: BinaryIO, size: int) -> bytes:
@@ -105,6 +138,7 @@ class AudioReceiverServer(ThreadingHTTPServer):
     daemon_threads = True
     output_dir: Path
     recognition_pipeline: RecognitionPipeline
+    keep_failed_audio: bool
 
 
 class AudioReceiverHandler(BaseHTTPRequestHandler):
@@ -205,22 +239,32 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
             flush=True,
         )
         try:
-            result = server.recognition_pipeline.recognize(final_path)
+            result = server.recognition_pipeline.recognize(
+                final_path, request_id=timestamp
+            )
         except CloudServiceError as error:
+            finalize_recording(
+                final_path,
+                should_retain_recording(
+                    server.keep_failed_audio, None, recognition_failed=True
+                ),
+            )
             self.send_error(500, f"Speech recognition failed: {error}")
             return
         except Exception as error:  # The client needs a clear HTTP failure.
+            finalize_recording(
+                final_path,
+                should_retain_recording(
+                    server.keep_failed_audio, None, recognition_failed=True
+                ),
+            )
             self.send_error(500, f"Speech recognition failed: {error}")
             return
-        finally:
-            try:
-                final_path.unlink(missing_ok=True)
-                print(f"Deleted temporary recording: {final_path.name}", flush=True)
-            except OSError as error:
-                print(
-                    f"WARNING: Could not delete {final_path.name}: {error}",
-                    flush=True,
-                )
+
+        finalize_recording(
+            final_path,
+            should_retain_recording(server.keep_failed_audio, result),
+        )
 
         print(f"Recognized: {result.text}", flush=True)
 
@@ -308,11 +352,7 @@ def main() -> None:
         )
 
     deepseek_client: DeepSeekClient | None = None
-    if os.environ.get("ENABLE_DEEPSEEK", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }:
+    if env_flag("ENABLE_DEEPSEEK"):
         deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         if deepseek_key:
             deepseek_client = DeepSeekClient(DeepSeekConfig.from_env())
@@ -325,6 +365,7 @@ def main() -> None:
 
     server = AudioReceiverServer((args.host, args.port), AudioReceiverHandler)
     server.output_dir = args.output.resolve()
+    server.keep_failed_audio = env_flag("KEEP_FAILED_AUDIO")
     server.recognition_pipeline = RecognitionPipeline(
         stt_provider,
         transcriber=transcriber,
@@ -332,9 +373,14 @@ def main() -> None:
         deepseek_client=deepseek_client,
         converter=OpenCC("t2s"),
         language=args.language,
+        debug=env_flag("DEBUG_RECOGNITION"),
     )
     print(f"Listening on http://{args.host}:{args.port}/audio", flush=True)
     print(f"Temporary WAV directory: {server.output_dir}", flush=True)
+    if server.recognition_pipeline.debug:
+        print("Recognition diagnostics enabled.", flush=True)
+    if server.keep_failed_audio:
+        print("Failed audio retention enabled.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

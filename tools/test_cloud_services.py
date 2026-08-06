@@ -14,6 +14,7 @@ from cloud_services import (
     TaskRecord,
     display_columns,
     format_task,
+    normalize_time_text,
     parse_task_json,
 )
 
@@ -118,6 +119,28 @@ class CloudTaskParsingTest(unittest.TestCase):
         )
 
         self.assertTrue(task.is_task)
+
+    def test_normalizes_common_spoken_time_expressions(self) -> None:
+        cases = {
+            "一会儿": "稍后",
+            "待会": "稍后",
+            "等一下": "稍后",
+            "今天晚上": "今晚",
+            "下班以后": "下班后",
+            "有空": "有空时",
+        }
+
+        for spoken, written in cases.items():
+            with self.subTest(spoken=spoken):
+                self.assertEqual(written, normalize_time_text(spoken))
+
+    def test_parsed_task_uses_normalized_time(self) -> None:
+        task = parse_task_json(
+            '{"is_task":true,"time":"一会儿","place":"",'
+            '"event":"维修手机","reason":""}'
+        )
+
+        self.assertEqual("稍后", task.time)
 
 
 class BaiduSpeechClientContractTest(unittest.TestCase):
@@ -226,8 +249,13 @@ class DeepSeekClientContractTest(unittest.TestCase):
         )
         body = json.loads(request.data.decode("utf-8"))  # type: ignore[attr-defined]
         self.assertEqual("deepseek-test", body["model"])
-        self.assertIn("今天下午学习嵌入式开发", body["messages"][1]["content"])
-        self.assertNotIn("person", body["messages"][1]["content"])
+        prompt = body["messages"][1]["content"]
+        self.assertIn("今天下午学习嵌入式开发", prompt)
+        self.assertIn("第一人称", prompt)
+        self.assertIn("回家要吃饭", prompt)
+        self.assertIn("一会儿要去修手机", prompt)
+        self.assertIn("稍后", prompt)
+        self.assertNotIn("person", prompt)
         self.assertEqual(9, timeout)
 
 

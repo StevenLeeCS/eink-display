@@ -12,13 +12,14 @@ constexpr char kStorePath[] = "/tasks.bin";
 constexpr char kTempPath[] = "/tasks.tmp";
 constexpr char kBackupPath[] = "/tasks.bak";
 constexpr uint32_t kStoreMagic = 0x5441534BU;  // "TASK"
-constexpr uint8_t kStoreVersion = 2;
+constexpr uint8_t kStoreVersion = 3;
 
 struct StoredCurrentTask {
   uint8_t present;
   uint8_t completed;
-  uint8_t completionRecorded;
+  uint8_t suppressHistory;
   uint8_t reserved;
+  uint32_t completionHistorySequence;
   char text[kTextCapacity];
 };
 
@@ -67,6 +68,19 @@ bool validText(const char* text, size_t capacity) {
   return text != nullptr && text[capacity - 1] == '\0';
 }
 
+bool historyContainsSequence(const StoreRecord& candidate, uint32_t sequence) {
+  if (sequence == 0) return false;
+  const size_t oldest =
+      (candidate.nextHistoryIndex + kHistoryCapacity -
+       candidate.historyCount) %
+      kHistoryCapacity;
+  for (size_t offset = 0; offset < candidate.historyCount; ++offset) {
+    const size_t index = (oldest + offset) % kHistoryCapacity;
+    if (candidate.history[index].sequence == sequence) return true;
+  }
+  return false;
+}
+
 bool validStore(const StoreRecord& candidate) {
   if (candidate.magic != kStoreMagic ||
       candidate.version != kStoreVersion ||
@@ -77,13 +91,24 @@ bool validStore(const StoreRecord& candidate) {
   }
   for (uint8_t region = 0; region < kRegionCount; ++region) {
     const StoredCurrentTask& task = candidate.current[region];
-    if (task.present > 1 || task.completed > 1 ||
-        task.completionRecorded > 1 ||
+    if (task.present > 1 || task.completed > 1 || task.suppressHistory > 1 ||
         !validText(task.text, sizeof(task.text))) {
       return false;
     }
+    if (task.completionHistorySequence != 0 &&
+        (task.present == 0 || task.completed == 0 ||
+         task.suppressHistory != 0 ||
+         !historyContainsSequence(candidate,
+                                  task.completionHistorySequence))) {
+      return false;
+    }
   }
-  for (size_t index = 0; index < candidate.historyCount; ++index) {
+  const size_t oldest =
+      (candidate.nextHistoryIndex + kHistoryCapacity -
+       candidate.historyCount) %
+      kHistoryCapacity;
+  for (size_t offset = 0; offset < candidate.historyCount; ++offset) {
+    const size_t index = (oldest + offset) % kHistoryCapacity;
     const StoredCompletedTask& task = candidate.history[index];
     if (task.sequence == 0 || task.region >= kRegionCount ||
         !validText(task.text, sizeof(task.text))) {
@@ -169,8 +194,20 @@ bool persist() {
   return true;
 }
 
-void appendCompleted(uint8_t region, const char* text) {
+void clearCurrentHistoryReference(uint32_t sequence) {
+  if (sequence == 0) return;
+  for (uint8_t region = 0; region < kRegionCount; ++region) {
+    if (store.current[region].completionHistorySequence == sequence) {
+      store.current[region].completionHistorySequence = 0;
+    }
+  }
+}
+
+uint32_t appendCompleted(uint8_t region, const char* text) {
   StoredCompletedTask& completed = store.history[store.nextHistoryIndex];
+  if (store.historyCount == kHistoryCapacity) {
+    clearCurrentHistoryReference(completed.sequence);
+  }
   completed = {};
   completed.sequence = store.nextSequence++;
   if (store.nextSequence == 0) store.nextSequence = 1;
@@ -179,6 +216,36 @@ void appendCompleted(uint8_t region, const char* text) {
   store.nextHistoryIndex =
       static_cast<uint8_t>((store.nextHistoryIndex + 1) % kHistoryCapacity);
   if (store.historyCount < kHistoryCapacity) ++store.historyCount;
+  return completed.sequence;
+}
+
+bool removeCompleted(uint32_t sequence) {
+  if (sequence == 0 || store.historyCount == 0) return false;
+  const size_t oldest =
+      (store.nextHistoryIndex + kHistoryCapacity - store.historyCount) %
+      kHistoryCapacity;
+  size_t targetOffset = store.historyCount;
+  for (size_t offset = 0; offset < store.historyCount; ++offset) {
+    const size_t index = (oldest + offset) % kHistoryCapacity;
+    if (store.history[index].sequence == sequence) {
+      targetOffset = offset;
+      break;
+    }
+  }
+  if (targetOffset == store.historyCount) return false;
+
+  for (size_t offset = targetOffset; offset + 1 < store.historyCount;
+       ++offset) {
+    const size_t destination = (oldest + offset) % kHistoryCapacity;
+    const size_t source = (oldest + offset + 1) % kHistoryCapacity;
+    store.history[destination] = store.history[source];
+  }
+  const size_t last =
+      (oldest + store.historyCount - 1) % kHistoryCapacity;
+  store.history[last] = {};
+  --store.historyCount;
+  store.nextHistoryIndex = static_cast<uint8_t>(last);
+  return true;
 }
 
 }  // namespace
@@ -218,11 +285,13 @@ bool getCurrent(uint8_t region, CurrentTask& task) {
   const StoredCurrentTask& stored = store.current[region];
   task.present = stored.present != 0;
   task.completed = stored.completed != 0;
+  task.historyEligible = task.present && stored.suppressHistory == 0;
+  task.completionHistorySequence = stored.completionHistorySequence;
   copyUtf8Text(task.text, sizeof(task.text), stored.text);
   return true;
 }
 
-bool setCurrent(uint8_t region, const char* text) {
+bool setCurrent(uint8_t region, const char* text, bool historyEligible) {
   if (!storeReady || region >= kRegionCount || text == nullptr ||
       text[0] == '\0') {
     return false;
@@ -230,6 +299,7 @@ bool setCurrent(uint8_t region, const char* text) {
   StoredCurrentTask& task = store.current[region];
   task = {};
   task.present = 1;
+  task.suppressHistory = historyEligible ? 0 : 1;
   copyUtf8Text(task.text, sizeof(task.text), text);
   return persist();
 }
@@ -241,9 +311,12 @@ bool setCompleted(uint8_t region, bool completed) {
   }
   StoredCurrentTask& task = store.current[region];
   task.completed = completed ? 1 : 0;
-  if (completed && task.completionRecorded == 0) {
-    appendCompleted(region, task.text);
-    task.completionRecorded = 1;
+  if (completed && task.completionHistorySequence == 0 &&
+      task.suppressHistory == 0) {
+    task.completionHistorySequence = appendCompleted(region, task.text);
+  } else if (!completed && task.completionHistorySequence != 0) {
+    removeCompleted(task.completionHistorySequence);
+    task.completionHistorySequence = 0;
   }
   return persist();
 }
@@ -273,6 +346,9 @@ bool clearCompleted() {
   memset(store.history, 0, sizeof(store.history));
   store.historyCount = 0;
   store.nextHistoryIndex = 0;
+  for (uint8_t region = 0; region < kRegionCount; ++region) {
+    store.current[region].completionHistorySequence = 0;
+  }
   return persist();
 }
 

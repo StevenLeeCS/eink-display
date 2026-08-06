@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import json
 from pathlib import Path
 import threading
 from typing import Any, Protocol
@@ -15,12 +16,13 @@ from cloud_services import (
     CloudServiceError,
     DISPLAY_COLUMNS_PER_LINE,
     DeepSeekClient,
+    TaskRecord,
     format_task,
 )
 
 
 NO_SPEECH_PROMPT = "未识别到语音"
-NOT_TASK_PROMPT = "未识别到待办事项"
+NOT_TASK_EVENT = "[未识别到待办事项,请重试]"
 DISPLAY_LINE_COUNT = 3
 
 PUNCTUATION_TRANSLATION = str.maketrans(
@@ -92,8 +94,12 @@ def structure_for_display(
     client: DeepSeekClient, transcript: str
 ) -> tuple[str, bool]:
     task = client.structure_transcript(transcript)
+    return task_for_display(task, transcript)
+
+
+def task_for_display(task: TaskRecord, transcript: str) -> tuple[str, bool]:
     if not task.is_task:
-        return NOT_TASK_PROMPT, False
+        return format_task(TaskRecord(event=NOT_TASK_EVENT), transcript), False
     return format_task(task, transcript), True
 
 
@@ -109,6 +115,7 @@ class RecognitionPipeline:
         deepseek_client: DeepSeekClient | None = None,
         converter: TextConverter | None = None,
         language: str = "zh",
+        debug: bool = False,
     ) -> None:
         if stt_provider not in {"local", "baidu"}:
             raise ValueError("stt_provider must be 'local' or 'baidu'")
@@ -118,19 +125,35 @@ class RecognitionPipeline:
         self.deepseek_client = deepseek_client
         self.converter = converter
         self.language = language
+        self.debug = debug
         self._lock = threading.Lock()
 
-    def recognize(self, wav_path: Path) -> RecognitionResult:
+    def recognize(
+        self, wav_path: Path, *, request_id: str | None = None
+    ) -> RecognitionResult:
         with self._lock:
             transcript = self._transcribe(wav_path)
+            log_id = request_id or "unknown"
+            if self.debug:
+                print(
+                    f"[recognition:{log_id}] transcript={transcript}",
+                    flush=True,
+                )
             speech_detected = bool(transcript)
             task_detected = speech_detected
             display_text = transcript
 
             if speech_detected and self.deepseek_client is not None:
                 try:
-                    display_text, task_detected = structure_for_display(
-                        self.deepseek_client, transcript
+                    task = self.deepseek_client.structure_transcript(transcript)
+                    if self.debug:
+                        print(
+                            f"[recognition:{log_id}] task="
+                            + json.dumps(asdict(task), ensure_ascii=False),
+                            flush=True,
+                        )
+                    display_text, task_detected = task_for_display(
+                        task, transcript
                     )
                     print(
                         f"Structured result (task={task_detected}): {display_text}",
@@ -178,10 +201,11 @@ class RecognitionPipeline:
 
 
 __all__ = [
-    "NOT_TASK_PROMPT",
+    "NOT_TASK_EVENT",
     "NO_SPEECH_PROMPT",
     "RecognitionPipeline",
     "RecognitionResult",
     "fit_display_text",
     "structure_for_display",
+    "task_for_display",
 ]
