@@ -142,7 +142,7 @@ class AudioReceiverServer(ThreadingHTTPServer):
 
 
 class AudioReceiverHandler(BaseHTTPRequestHandler):
-    server_version = "EinkAudioReceiver/3.0"
+    server_version = "EinkAudioReceiver/3.1"
 
     def do_POST(self) -> None:
         if self.path != "/audio":
@@ -240,7 +240,8 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
         )
         try:
             result = server.recognition_pipeline.recognize(
-                final_path, request_id=timestamp
+                final_path,
+                request_id=timestamp,
             )
         except CloudServiceError as error:
             finalize_recording(
@@ -278,6 +279,9 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
         self.send_header(
             "X-Task-Detected", task_detection_header(result.task_detected)
         )
+        self.send_header("X-Task-Time-Kind", result.schedule.kind)
+        self.send_header("X-Task-Start-At", str(result.schedule.start_at))
+        self.send_header("X-Task-End-At", str(result.schedule.end_at))
         self.end_headers()
         self.wfile.write(body)
 

@@ -78,7 +78,9 @@ class ChunkedAudioTest(unittest.TestCase):
 
     def test_deepseek_client_contract_is_used(self) -> None:
         class FakeDeepSeekClient:
-            def structure_transcript(self, transcript: str) -> TaskRecord:
+            def structure_transcript(
+                self, transcript: str, **kwargs: object
+            ) -> TaskRecord:
                 self.transcript = transcript
                 return TaskRecord(time="今天", event="学习嵌入式开发")
 
@@ -94,7 +96,9 @@ class ChunkedAudioTest(unittest.TestCase):
 
     def test_non_task_returns_normal_task_display_structure(self) -> None:
         class FakeDeepSeekClient:
-            def structure_transcript(self, transcript: str) -> TaskRecord:
+            def structure_transcript(
+                self, transcript: str, **kwargs: object
+            ) -> TaskRecord:
                 return TaskRecord(is_task=False, reason="只是闲聊")
 
         displayed, task_detected = structure_for_display(
@@ -135,7 +139,9 @@ class RecognitionPipelineTest(unittest.TestCase):
                 return [SimpleNamespace(text="今天学习嵌入式开发")], object()
 
         class FailingDeepSeekClient:
-            def structure_transcript(self, transcript: str) -> TaskRecord:
+            def structure_transcript(
+                self, transcript: str, **kwargs: object
+            ) -> TaskRecord:
                 raise CloudServiceError("temporary failure")
 
         pipeline = RecognitionPipeline(
@@ -158,7 +164,9 @@ class RecognitionPipelineTest(unittest.TestCase):
                 return [SimpleNamespace(text="今天天气不错")], object()
 
         class FakeDeepSeekClient:
-            def structure_transcript(self, transcript: str) -> TaskRecord:
+            def structure_transcript(
+                self, transcript: str, **kwargs: object
+            ) -> TaskRecord:
                 return TaskRecord(is_task=False, reason="闲聊")
 
         pipeline = RecognitionPipeline(
@@ -186,7 +194,9 @@ class RecognitionPipelineTest(unittest.TestCase):
                 return [SimpleNamespace(text="回家要吃饭")], object()
 
         class FakeDeepSeekClient:
-            def structure_transcript(self, transcript: str) -> TaskRecord:
+            def structure_transcript(
+                self, transcript: str, **kwargs: object
+            ) -> TaskRecord:
                 return TaskRecord(
                     time="",
                     place="家",
@@ -211,7 +221,6 @@ class RecognitionPipelineTest(unittest.TestCase):
         self.assertIn('"is_task": true', log)
         self.assertIn('"reason": "未来行动意图"', log)
         self.assertTrue(result.task_detected)
-
 
 if __name__ == "__main__":
     unittest.main()

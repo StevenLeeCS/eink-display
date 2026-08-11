@@ -8,9 +8,9 @@ microphone. The panel is used clockwise in a logical 300x400 portrait layout,
 aligned to a case with four task openings and a fifth function opening. The old
 arbitrary-image display pipeline has been removed.
 
-The current remote revision is the completed Stage 0 baseline. Continue product
-development on a new branch; keep the baseline usable while replacing the
-temporary PC recognition path incrementally.
+Stage 0 remains the stable baseline. Active product development continues on
+`feature/core-cloud-workflow`, while the temporary PC recognition path is
+replaced incrementally.
 
 ## Hardware
 
@@ -63,10 +63,23 @@ temporary PC recognition path incrementally.
 - The receiver can use local faster-whisper or Baidu STT, then optionally ask
   DeepSeek for bounded `time/place/event` task fields. Output is capped to three
   lines and 16 full-width characters per line before it reaches the device.
-- Non-task speech shows a marker-free prompt in an empty region. If the region
-  already contains a task, its text and completion state are preserved.
+- Non-task speech uses the normal three-line task layout with
+  `事情:[未识别到待办事项,请重试]`; it can be toggled locally but is excluded
+  from completed history.
 - No-speech and generic retry prompts have no marker. Technical errors remain
   in the serial log.
+- The function opening uses a fixed three-line nickname/message/emoticon layout.
+  Automatic mode has six scenes: welcome, due soon, due check, next action,
+  summary and warm interaction. Scene timing and priority are deterministic;
+  DeepSeek no longer chooses a function scene.
+- The Python gateway resolves exact times and common Chinese time periods to
+  hidden Beijing-time coordinates. The device uses SNTP and a 15-second local
+  scheduler, persists reminder flags, sends each task's due-soon/due-check
+  reminder once, summarizes on completion, and checks warm interaction at
+  08:00/11:00/14:00/17:00/20:00.
+- Chinese rendering embeds all 3755 GB2312 level-1 glyphs plus an explicit
+  supplemental list. The current supplement is `馨`; unsupported characters
+  still render as `?`.
 - Display updates write both SSD1683 RAM planes. Four fast refreshes are
   followed by one full refresh to limit artifacts.
 
@@ -81,7 +94,8 @@ temporary PC recognition path incrementally.
 - `src/device_settings.cpp`: versioned NVS storage for runtime receiver
   and cloud API settings.
 - `src/task_store.cpp`: versioned LittleFS cache for four active tasks and the
-  30-entry completed-task ring.
+  30-entry completed-task ring, hidden schedules and reminder state.
+- `src/task_scheduler.cpp`: SNTP-backed deterministic function-scene scheduler.
 - `src/inmp441_audio.cpp`: INMP441 I2S initialization and PCM capture.
 - `src/ascii_font_16.cpp`, `src/chinese_font_16.cpp`: access embedded font data.
 - `assets/`: required ASCII/GB2312 font binaries and the embedded phone admin
@@ -90,6 +104,8 @@ temporary PC recognition path incrementally.
 - `tools/audio_receiver.py`: streaming WAV upload and HTTP response gateway.
 - `tools/recognition_pipeline.py`: provider selection, STT, DeepSeek fallback
   and display-text normalization.
+- `tools/task_schedule.py`: deterministic Beijing-time coordinate resolver.
+- `tools/font_extra_chars.txt`: controlled supplemental HZK16 glyph list.
 - `tools/test_audio_receiver.py`: receiver and chunked-transfer tests.
 - `tools/cloud_services.py`: Baidu STT and DeepSeek adapters used by the
   receiver; provider keys are supplied through the ignored env file.
@@ -136,7 +152,8 @@ Keep and extend these proven components:
 - Button gestures, region ownership, VAD concepts and UI event semantics in
   `src/voice_upload.cpp`.
 - INMP441 16 kHz mono PCM capture in `src/inmp441_audio.cpp`.
-- GB2312 level-1 and ASCII font assets and their embedding configuration.
+- GB2312 level-1, controlled supplemental HZK16 and ASCII font assets and their
+  embedding configuration.
 - The Python receiver and its tests as development fixtures for audio capture
   and protocol regression tests, not as a production dependency.
 
@@ -224,9 +241,11 @@ interfaces.
 ## Verification
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile tools\audio_receiver.py tools\cloud_services.py tools\recognition_pipeline.py tools\test_audio_receiver.py tools\test_cloud_services.py
+.\.venv\Scripts\python.exe -m py_compile tools\audio_receiver.py tools\cloud_services.py tools\recognition_pipeline.py tools\task_schedule.py tools\test_audio_receiver.py tools\test_cloud_services.py tools\test_task_schedule.py tools\test_font_assets.py
 .\.venv\Scripts\python.exe tools\test_audio_receiver.py
 .\.venv\Scripts\python.exe tools\test_cloud_services.py
+.\.venv\Scripts\python.exe tools\test_task_schedule.py
+.\.venv\Scripts\python.exe tools\test_font_assets.py
 pio run
 git diff --check
 ```

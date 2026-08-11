@@ -1,9 +1,13 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <cstring>
+#include <time.h>
 
 #include "ascii_font_16.h"
 #include "chinese_font_16.h"
+#include "device_settings.h"
+#include "function_area.h"
+#include "task_scheduler.h"
 #include "task_store.h"
 #include "ui_layout.h"
 #include "voice_upload.h"
@@ -41,6 +45,10 @@ constexpr uint16_t kSlotTextTopPadding = 6;
 constexpr uint16_t kTaskTextWidth = kDisplayWidth - kTaskTextX - 12;
 constexpr uint16_t kSlotTextHeight = 56;
 constexpr uint16_t kTextLineHeight = 20;
+constexpr uint16_t kFunctionTextX = 8;
+constexpr uint16_t kFunctionTextRight = kDisplayWidth - 8;
+constexpr uint16_t kFunctionFirstLineOffset = 2;
+constexpr uint16_t kFunctionLineHeight = 22;
 constexpr uint32_t kFullWidthExclamation = 0xFF01;
 constexpr uint8_t kPartialRefreshesBeforeFull = 4;
 
@@ -202,6 +210,10 @@ bool regionCompleted[ui_layout::kTaskRegionCount] = {};
 bool regionHasResult[ui_layout::kTaskRegionCount] = {};
 uint16_t regionMarkerX[ui_layout::kTaskRegionCount] = {};
 uint16_t regionMarkerY[ui_layout::kTaskRegionCount] = {};
+uint32_t renderedProfileRevision = 0;
+function_area::Scene activeFunctionScene = function_area::Scene::Welcome;
+bool deferFunctionRefresh = false;
+bool functionAreaDirty = false;
 
 void setPixel(uint16_t x, uint16_t y, bool black) {
   if (x >= kDisplayWidth || y >= kDisplayHeight) return;
@@ -459,10 +471,40 @@ bool drawInitialRegion(uint8_t region) {
   return drawCenteredSlotText(region, kPrompts[region]);
 }
 
-bool drawFunctionDefault() {
-  return drawCenteredSlotText(
-      ui_layout::kFunctionSlot,
-      u8"\u6B22\u8FCE\u4F7F\u7528\u7535\u7EB8\u4FBF\u5229\u8D34\uFF01");
+bool drawFunctionArea() {
+  const device_settings::ProfileSettings& profile =
+      device_settings::profile();
+  const function_area::Scene scene =
+      !profile.functionTestEnabled
+          ? function_area::Scene::Welcome
+          : (profile.aiSceneTestEnabled ? activeFunctionScene
+                                        : profile.testScene);
+  const function_area::Presentation& presentation =
+      function_area::presentationFor(scene);
+  const String salutation = String(profile.nickname) + ',';
+
+  uint16_t salutationWidth = 0;
+  uint16_t messageWidth = 0;
+  uint16_t emoticonWidth = 0;
+  if (!measureText16(salutation.c_str(), salutationWidth) ||
+      !measureText16(presentation.message, messageWidth) ||
+      !measureText16(presentation.emoticon, emoticonWidth) ||
+      salutationWidth > kFunctionTextRight - kFunctionTextX ||
+      messageWidth > kFunctionTextRight - kFunctionTextX ||
+      emoticonWidth > kFunctionTextRight - kFunctionTextX) {
+    return false;
+  }
+
+  clearDisplaySlot(ui_layout::kFunctionSlot);
+  drawSlotDividers();
+  const uint16_t firstY =
+      slotTop(ui_layout::kFunctionSlot) + kFunctionFirstLineOffset;
+  return drawText16(kFunctionTextX, firstY, salutation.c_str()) &&
+         drawText16(kFunctionTextX, firstY + kFunctionLineHeight,
+                    presentation.message) &&
+         drawText16(kFunctionTextRight - emoticonWidth,
+                    firstY + 2 * kFunctionLineHeight,
+                    presentation.emoticon);
 }
 
 bool drawInitialDisplay() {
@@ -470,7 +512,44 @@ bool drawInitialDisplay() {
   for (uint8_t region = 0; region < ui_layout::kTaskRegionCount; ++region) {
     rendered = drawInitialRegion(region) && rendered;
   }
-  return drawFunctionDefault() && rendered;
+  return drawFunctionArea() && rendered;
+}
+
+bool refreshDisplaySlot(uint8_t slot);
+
+void applyScheduledFunctionScene(function_area::Scene scene) {
+  if (!function_area::isValid(scene)) return;
+  activeFunctionScene = scene;
+  if (!drawFunctionArea()) {
+    Serial.println("ERROR: Scheduled function scene could not be rendered.");
+    return;
+  }
+  functionAreaDirty = true;
+  if (deferFunctionRefresh || !voiceDisplayReady) return;
+  const bool refreshed = refreshDisplaySlot(ui_layout::kFunctionSlot);
+  if (refreshed) functionAreaDirty = false;
+  Serial.printf("Scheduled function scene '%s' %s.\n",
+                function_area::sceneId(scene),
+                refreshed ? "displayed" : "refresh failed");
+}
+
+void refreshFunctionAreaIfChanged() {
+  const uint32_t revision = device_settings::profileRevision();
+  if (!voiceDisplayReady || revision == renderedProfileRevision) return;
+  renderedProfileRevision = revision;
+  if (device_settings::profile().functionTestEnabled &&
+      device_settings::profile().aiSceneTestEnabled) {
+    task_scheduler::settingsChanged();
+    return;
+  }
+  activeFunctionScene = device_settings::profile().testScene;
+  if (!drawFunctionArea()) {
+    Serial.println("ERROR: Function area profile could not be rendered.");
+    return;
+  }
+  const bool refreshed = refreshDisplaySlot(ui_layout::kFunctionSlot);
+  Serial.println(refreshed ? "Function area profile displayed."
+                           : "ERROR: Function area refresh failed.");
 }
 
 bool refreshDisplaySlot(uint8_t slot) {
@@ -535,7 +614,8 @@ void clearCachedTask(uint8_t region) {
 }
 
 void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
-                        const char* text) {
+                        const char* text,
+                        const task_store::TaskSchedule* schedule) {
   if (!voiceDisplayReady) {
     Serial.println("ERROR: Display is not ready for region updates.");
     return;
@@ -563,10 +643,14 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         Serial.println("ERROR: Recognition text could not be rendered.");
         return;
       }
+      deferFunctionRefresh = true;
       if (!task_store::setCurrent(
               region, text,
-              event == voice_upload::RegionEvent::Recognition)) {
+              event == voice_upload::RegionEvent::Recognition,
+              schedule != nullptr ? *schedule : task_store::TaskSchedule{})) {
         Serial.println("ERROR: Recognition task could not be cached.");
+      } else if (event == voice_upload::RegionEvent::Recognition) {
+        task_scheduler::taskStored();
       }
       break;
     case voice_upload::RegionEvent::NoSpeech:
@@ -575,26 +659,40 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         Serial.println("ERROR: No-speech prompt could not be rendered.");
         return;
       }
+      deferFunctionRefresh = true;
       clearCachedTask(region);
+      task_scheduler::taskRemoved();
       break;
-    case voice_upload::RegionEvent::ToggleCompletion:
+    case voice_upload::RegionEvent::ToggleCompletion: {
       if (!regionHasResult[region]) {
         Serial.println("Region has no recognition result to toggle.");
         return;
       }
+      deferFunctionRefresh = true;
       regionCompleted[region] = !regionCompleted[region];
       drawCompletionMarker(regionMarkerX[region], regionMarkerY[region],
                            regionCompleted[region]);
-      if (!task_store::setCompleted(region, regionCompleted[region])) {
+      const time_t completionTime = time(nullptr);
+      const uint64_t completedAt =
+          completionTime >= 1700000000
+              ? static_cast<uint64_t>(completionTime)
+              : 0;
+      if (!task_store::setCompleted(region, regionCompleted[region],
+                                    completedAt)) {
         Serial.println("ERROR: Task completion state could not be saved.");
+      } else {
+        task_scheduler::completionChanged(regionCompleted[region]);
       }
       break;
+    }
     case voice_upload::RegionEvent::Reset:
       if (!drawInitialRegion(region)) {
         Serial.println("ERROR: Initial region prompt could not be rendered.");
         return;
       }
+      deferFunctionRefresh = true;
       clearCachedTask(region);
+      task_scheduler::taskRemoved();
       break;
     case voice_upload::RegionEvent::Status:
       // Function-slot status is handled before task-region validation.
@@ -605,11 +703,15 @@ void displayRegionEvent(uint8_t region, voice_upload::RegionEvent event,
         Serial.println("ERROR: Generic error prompt could not be rendered.");
         return;
       }
+      deferFunctionRefresh = true;
       clearCachedTask(region);
+      task_scheduler::taskRemoved();
       break;
   }
 
   const bool refreshed = refreshDisplaySlot(region);
+  deferFunctionRefresh = false;
+  if (refreshed) functionAreaDirty = false;
   Serial.println(refreshed ? "Region update displayed."
                            : "ERROR: Display refresh failed.");
 }
@@ -622,13 +724,17 @@ void setup() {
 
   voice_upload::setEventCallback(displayRegionEvent);
   memset(framebuffer, 0xFF, sizeof(framebuffer));
+  device_settings::begin();
+  activeFunctionScene = device_settings::profile().testScene;
   if (!task_store::begin()) {
     Serial.println("ERROR: Task cache is unavailable.");
   }
+  task_scheduler::begin(applyScheduledFunctionScene);
   if (!drawInitialDisplay()) {
     Serial.println("ERROR: Initial five-slot display could not be rendered.");
   }
   restoreCachedTasks();
+  renderedProfileRevision = device_settings::profileRevision();
   const bool displayInitialized = display.begin() && display.display(framebuffer);
   if (displayInitialized) {
     voiceDisplayReady = true;
@@ -641,4 +747,8 @@ void setup() {
   }
 }
 
-void loop() { voice_upload::poll(); }
+void loop() {
+  voice_upload::poll();
+  refreshFunctionAreaIfChanged();
+  task_scheduler::poll();
+}

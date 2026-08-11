@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <cstdint>
 
+#include "function_area.h"
+
 namespace device_settings {
 
 struct ReceiverSettings {
@@ -31,6 +33,13 @@ struct CloudSettingsUpdate {
   String deepseekModel;
 };
 
+struct ProfileSettings {
+  char nickname[32];
+  bool functionTestEnabled;
+  bool aiSceneTestEnabled;
+  function_area::Scene testScene;
+};
+
 void begin();
 const ReceiverSettings& receiver();
 bool saveReceiver(const String& host, uint16_t port, const String& path);
@@ -39,5 +48,9 @@ const CloudSettings& cloud();
 bool saveCloud(const CloudSettingsUpdate& update,
                bool preserveEmptySecrets = true);
 void resetCloud();
+const ProfileSettings& profile();
+bool saveProfile(const String& nickname, bool functionTestEnabled,
+                 bool aiSceneTestEnabled, function_area::Scene testScene);
+uint32_t profileRevision();
 
 }  // namespace device_settings

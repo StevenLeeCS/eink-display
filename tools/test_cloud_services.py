@@ -142,7 +142,6 @@ class CloudTaskParsingTest(unittest.TestCase):
 
         self.assertEqual("稍后", task.time)
 
-
 class BaiduSpeechClientContractTest(unittest.TestCase):
     def test_requests_token_then_submits_raw_pcm(self) -> None:
         opener = QueueOpener(
@@ -257,7 +256,6 @@ class DeepSeekClientContractTest(unittest.TestCase):
         self.assertIn("稍后", prompt)
         self.assertNotIn("person", prompt)
         self.assertEqual(9, timeout)
-
 
 if __name__ == "__main__":
     unittest.main()

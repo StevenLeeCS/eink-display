@@ -83,6 +83,13 @@ String jsonEscape(const String& value) {
   return escaped;
 }
 
+void appendUint64(String& output, uint64_t value) {
+  char encoded[24];
+  snprintf(encoded, sizeof(encoded), "%llu",
+           static_cast<unsigned long long>(value));
+  output += encoded;
+}
+
 void sendJson(WebServer& server, int status, const String& body) {
   server.sendHeader("Cache-Control", "no-store");
   server.send(status, "application/json; charset=utf-8", body);
@@ -209,6 +216,8 @@ void registerStatusRoutes(WebServer& server) {
     const device_settings::ReceiverSettings& receiver =
         device_settings::receiver();
     const device_settings::CloudSettings& cloud = device_settings::cloud();
+    const device_settings::ProfileSettings& profile =
+        device_settings::profile();
     String response;
     response.reserve(1024);
     response += F("{\"connected\":");
@@ -243,6 +252,14 @@ void registerStatusRoutes(WebServer& server) {
     response += jsonEscape(cloud.deepseekApiUrl);
     response += F("\",\"deepseek_model\":\"");
     response += jsonEscape(cloud.deepseekModel);
+    response += F("\"},\"profile\":{\"nickname\":\"");
+    response += jsonEscape(profile.nickname);
+    response += F("\",\"function_test_enabled\":");
+    response += profile.functionTestEnabled ? F("true") : F("false");
+    response += F(",\"ai_scene_test_enabled\":");
+    response += profile.aiSceneTestEnabled ? F("true") : F("false");
+    response += F(",\"test_scene\":\"");
+    response += function_area::sceneId(profile.testScene);
     response += F("\"}}");
     sendJson(server, 200, response);
   });
@@ -281,6 +298,22 @@ void registerStatusRoutes(WebServer& server) {
       response += task.completed ? F("true") : F("false");
       response += F(",\"history_eligible\":");
       response += task.historyEligible ? F("true") : F("false");
+      response += F(",\"revision\":");
+      response += task.revision;
+      response += F(",\"schedule_kind\":\"");
+      response += task.schedule.kind == task_store::ScheduleKind::Exact
+                      ? F("exact")
+                  : task.schedule.kind == task_store::ScheduleKind::Window
+                      ? F("window")
+                      : F("none");
+      response += F("\",\"start_at\":");
+      appendUint64(response, task.schedule.startAt);
+      response += F(",\"end_at\":");
+      appendUint64(response, task.schedule.endAt);
+      response += F(",\"due_soon_sent\":");
+      response += task.dueSoonSent ? F("true") : F("false");
+      response += F(",\"due_check_sent\":");
+      response += task.dueCheckSent ? F("true") : F("false");
       response += F(",\"text\":\"");
       response += jsonEscape(task.text);
       response += F("\"}");
@@ -297,6 +330,8 @@ void registerStatusRoutes(WebServer& server) {
       response += task.sequence;
       response += F(",\"region\":");
       response += task.region + 1;
+      response += F(",\"completed_at\":");
+      appendUint64(response, task.completedAt);
       response += F(",\"text\":\"");
       response += jsonEscape(task.text);
       response += F("\"}");
@@ -378,6 +413,22 @@ void registerConfigurationRoutes(WebServer& server) {
   server.on("/api/settings/reset", HTTP_POST, [&server]() {
     device_settings::resetReceiver();
     sendMessage(server, 200, F("已恢复编译时默认设置"));
+  });
+
+  server.on("/api/profile", HTTP_POST, [&server]() {
+    String nickname = server.arg("nickname");
+    String sceneId = server.arg("test_scene");
+    nickname.trim();
+    sceneId.trim();
+    function_area::Scene scene = function_area::Scene::Welcome;
+    if (!function_area::sceneFromId(sceneId.c_str(), scene) ||
+        !device_settings::saveProfile(
+            nickname, server.arg("function_test_enabled") == "1",
+            server.arg("ai_scene_test_enabled") == "1", scene)) {
+      sendMessage(server, 400, F("称呼或功能区测试设置格式无效"));
+      return;
+    }
+    sendMessage(server, 200, F("称呼和功能区设置已保存"));
   });
 
   server.on("/api/cloud", HTTP_POST, [&server]() {

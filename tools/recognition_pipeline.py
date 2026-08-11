@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import threading
@@ -19,11 +20,13 @@ from cloud_services import (
     TaskRecord,
     format_task,
 )
+from task_schedule import TaskSchedule, resolve_task_schedule
 
 
 NO_SPEECH_PROMPT = "未识别到语音"
 NOT_TASK_EVENT = "[未识别到待办事项,请重试]"
 DISPLAY_LINE_COUNT = 3
+PRODUCT_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 PUNCTUATION_TRANSLATION = str.maketrans(
     {
@@ -52,6 +55,7 @@ class RecognitionResult:
     text: str
     speech_detected: bool
     task_detected: bool
+    schedule: TaskSchedule = TaskSchedule()
 
 
 def fit_display_text(text: str) -> str:
@@ -129,7 +133,10 @@ class RecognitionPipeline:
         self._lock = threading.Lock()
 
     def recognize(
-        self, wav_path: Path, *, request_id: str | None = None
+        self,
+        wav_path: Path,
+        *,
+        request_id: str | None = None,
     ) -> RecognitionResult:
         with self._lock:
             transcript = self._transcribe(wav_path)
@@ -142,10 +149,15 @@ class RecognitionPipeline:
             speech_detected = bool(transcript)
             task_detected = speech_detected
             display_text = transcript
+            schedule = TaskSchedule()
 
             if speech_detected and self.deepseek_client is not None:
                 try:
-                    task = self.deepseek_client.structure_transcript(transcript)
+                    current_time = datetime.now(PRODUCT_TIMEZONE)
+                    task = self.deepseek_client.structure_transcript(
+                        transcript,
+                        current_time=current_time.isoformat(timespec="minutes"),
+                    )
                     if self.debug:
                         print(
                             f"[recognition:{log_id}] task="
@@ -155,6 +167,8 @@ class RecognitionPipeline:
                     display_text, task_detected = task_for_display(
                         task, transcript
                     )
+                    if task_detected:
+                        schedule = resolve_task_schedule(task.time, current_time)
                     print(
                         f"Structured result (task={task_detected}): {display_text}",
                         flush=True,
@@ -177,6 +191,7 @@ class RecognitionPipeline:
                 text=display_text,
                 speech_detected=speech_detected,
                 task_detected=task_detected,
+                schedule=schedule,
             )
 
     def _transcribe(self, wav_path: Path) -> str:

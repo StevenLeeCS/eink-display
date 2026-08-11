@@ -3,6 +3,24 @@
 Daily handoff notes for developers and AI agents. Add new dates at the top.
 Update `README.md` only when explicitly requested.
 
+## 2026-08-11
+
+### Completed
+
+- Added the nickname/NVS three-line function area and reduced automatic output
+  to six fixed scenes selected by deterministic rules instead of AI.
+- Added Beijing-time task coordinates, SNTP scheduling, persistent one-shot
+  due reminders, completion summaries and five daily warm-interaction checks.
+- Upgraded the audio response and LittleFS task records for hidden schedules,
+  task revisions, completion times and restart-safe reminder state.
+- Added `馨` as a 36-byte on-demand HZK16 supplement and made future additions
+  maintainable through `tools/font_extra_chars.txt`.
+
+### Current state
+
+- Firmware and 40 Python tests pass; server restart, flashing and physical
+  scene/timing verification remain manual.
+
 ## 2026-08-05
 
 ### Completed

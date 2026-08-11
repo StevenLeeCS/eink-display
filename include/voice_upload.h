@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "task_store.h"
+
 namespace voice_upload {
 
 enum class RegionEvent : uint8_t {
@@ -15,7 +17,8 @@ enum class RegionEvent : uint8_t {
 };
 
 using EventCallback =
-    void (*)(uint8_t region, RegionEvent event, const char* text);
+    void (*)(uint8_t region, RegionEvent event, const char* text,
+             const task_store::TaskSchedule* schedule);
 
 void setEventCallback(EventCallback callback);
 bool begin();

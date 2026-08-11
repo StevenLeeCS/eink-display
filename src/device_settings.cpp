@@ -11,10 +11,14 @@ namespace {
 constexpr char kPreferencesNamespace[] = "eink-app";
 constexpr char kReceiverKey[] = "receiver";
 constexpr char kCloudKey[] = "cloud";
+constexpr char kProfileKey[] = "profile";
 constexpr uint32_t kReceiverMagic = 0x52435652U;  // "RCVR"
 constexpr uint8_t kReceiverVersion = 1;
 constexpr uint32_t kCloudMagic = 0x434C4F55U;  // "CLOU"
 constexpr uint8_t kCloudVersion = 1;
+constexpr uint32_t kProfileMagic = 0x50524F46U;  // "PROF"
+constexpr uint8_t kProfileVersion = 2;
+constexpr uint8_t kMaxNicknameColumns = 12;
 constexpr char kDefaultBaiduSpeechUrl[] =
     "https://vop.baidu.com/server_api";
 constexpr char kDefaultDeepSeekApiUrl[] =
@@ -41,8 +45,30 @@ struct CloudRecord {
   char deepseekModel[40];
 };
 
+struct ProfileRecordV1 {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t functionTestEnabled;
+  uint8_t testScene;
+  char nickname[32];
+};
+
+struct ProfileRecord {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t functionTestEnabled;
+  uint8_t aiSceneTestEnabled;
+  uint8_t testScene;
+  char nickname[32];
+};
+
+static_assert(sizeof(ProfileRecordV1) == sizeof(ProfileRecord),
+              "Profile v1 migration expects equal record sizes");
+
 ReceiverSettings currentReceiver = {};
 CloudSettings currentCloud = {};
+ProfileSettings currentProfile = {};
+uint32_t currentProfileRevision = 0;
 bool initialized = false;
 
 void copyText(char* destination, size_t size, const char* source) {
@@ -67,6 +93,53 @@ void loadCloudDefaults() {
            sizeof(currentCloud.deepseekApiUrl), kDefaultDeepSeekApiUrl);
   copyText(currentCloud.deepseekModel, sizeof(currentCloud.deepseekModel),
            kDefaultDeepSeekModel);
+}
+
+void loadProfileDefaults() {
+  currentProfile = {};
+  copyText(currentProfile.nickname, sizeof(currentProfile.nickname),
+           u8"\u670B\u53CB");
+  currentProfile.functionTestEnabled = false;
+  currentProfile.aiSceneTestEnabled = false;
+  currentProfile.testScene = function_area::Scene::Welcome;
+}
+
+bool validNickname(const char* nickname) {
+  if (nickname == nullptr || nickname[0] == '\0') return false;
+  uint8_t columns = 0;
+  const uint8_t* cursor = reinterpret_cast<const uint8_t*>(nickname);
+  while (*cursor != 0) {
+    if (*cursor >= 0x20U && *cursor <= 0x7EU) {
+      ++cursor;
+      ++columns;
+    } else if (*cursor >= 0xC2U && *cursor <= 0xDFU &&
+               (cursor[1] & 0xC0U) == 0x80U) {
+      cursor += 2;
+      columns += 2;
+    } else if (*cursor >= 0xE0U && *cursor <= 0xEFU &&
+               (cursor[1] & 0xC0U) == 0x80U &&
+               (cursor[2] & 0xC0U) == 0x80U &&
+               !(*cursor == 0xE0U && cursor[1] < 0xA0U) &&
+               !(*cursor == 0xEDU && cursor[1] >= 0xA0U)) {
+      cursor += 3;
+      columns += 2;
+    } else {
+      return false;
+    }
+    if (columns > kMaxNicknameColumns) return false;
+  }
+  return columns > 0;
+}
+
+bool validStoredScene(uint8_t value) {
+  return function_area::isValid(static_cast<function_area::Scene>(value)) ||
+         value == 3 || value == 5 || value == 6;
+}
+
+function_area::Scene normalizeStoredScene(uint8_t value) {
+  return value == 3 || value == 5 || value == 6
+             ? function_area::Scene::NextAction
+             : static_cast<function_area::Scene>(value);
 }
 
 bool validHost(const char* host) {
@@ -132,6 +205,24 @@ bool validCloudRecord(const CloudRecord& record, size_t bytesRead) {
          validUrl(record.deepseekApiUrl) && validModel(record.deepseekModel);
 }
 
+bool validProfileRecord(const ProfileRecord& record, size_t bytesRead) {
+  return bytesRead == sizeof(record) && record.magic == kProfileMagic &&
+         record.version == kProfileVersion &&
+         record.functionTestEnabled <= 1 &&
+         record.aiSceneTestEnabled <= 1 &&
+         record.nickname[sizeof(record.nickname) - 1] == '\0' &&
+         validNickname(record.nickname) &&
+         validStoredScene(record.testScene);
+}
+
+bool validProfileRecordV1(const ProfileRecordV1& record, size_t bytesRead) {
+  return bytesRead == sizeof(record) && record.magic == kProfileMagic &&
+         record.version == 1 && record.functionTestEnabled <= 1 &&
+         record.nickname[sizeof(record.nickname) - 1] == '\0' &&
+         validNickname(record.nickname) &&
+         validStoredScene(record.testScene);
+}
+
 void applyCloudRecord(const CloudRecord& record) {
   currentCloud.deepseekEnabled = record.deepseekEnabled != 0;
   copyText(currentCloud.baiduApiKey, sizeof(currentCloud.baiduApiKey),
@@ -148,6 +239,22 @@ void applyCloudRecord(const CloudRecord& record) {
            record.deepseekModel);
 }
 
+void applyProfileRecord(const ProfileRecord& record) {
+  copyText(currentProfile.nickname, sizeof(currentProfile.nickname),
+           record.nickname);
+  currentProfile.functionTestEnabled = record.functionTestEnabled != 0;
+  currentProfile.aiSceneTestEnabled = record.aiSceneTestEnabled != 0;
+  currentProfile.testScene = normalizeStoredScene(record.testScene);
+}
+
+void applyProfileRecordV1(const ProfileRecordV1& record) {
+  copyText(currentProfile.nickname, sizeof(currentProfile.nickname),
+           record.nickname);
+  currentProfile.functionTestEnabled = record.functionTestEnabled != 0;
+  currentProfile.aiSceneTestEnabled = false;
+  currentProfile.testScene = normalizeStoredScene(record.testScene);
+}
+
 }  // namespace
 
 void begin() {
@@ -155,6 +262,7 @@ void begin() {
   initialized = true;
   loadDefaults();
   loadCloudDefaults();
+  loadProfileDefaults();
 
   Preferences preferences;
   if (!preferences.begin(kPreferencesNamespace, true)) {
@@ -175,6 +283,13 @@ void begin() {
       cloudSize == sizeof(cloudRecord)
           ? preferences.getBytes(kCloudKey, &cloudRecord, sizeof(cloudRecord))
           : 0;
+  uint8_t profileBytesBuffer[sizeof(ProfileRecord)] = {};
+  const size_t profileSize = preferences.getBytesLength(kProfileKey);
+  const size_t profileBytes =
+      profileSize == sizeof(profileBytesBuffer)
+          ? preferences.getBytes(kProfileKey, profileBytesBuffer,
+                                 sizeof(profileBytesBuffer))
+          : 0;
   preferences.end();
   if (validRecord(receiverRecord, receiverBytes)) {
     copyText(currentReceiver.host, sizeof(currentReceiver.host),
@@ -186,6 +301,16 @@ void begin() {
   if (validCloudRecord(cloudRecord, cloudBytes)) {
     applyCloudRecord(cloudRecord);
   }
+  ProfileRecord profileRecord = {};
+  memcpy(&profileRecord, profileBytesBuffer, sizeof(profileRecord));
+  ProfileRecordV1 profileRecordV1 = {};
+  memcpy(&profileRecordV1, profileBytesBuffer, sizeof(profileRecordV1));
+  if (validProfileRecord(profileRecord, profileBytes)) {
+    applyProfileRecord(profileRecord);
+  } else if (validProfileRecordV1(profileRecordV1, profileBytes)) {
+    applyProfileRecordV1(profileRecordV1);
+  }
+  currentProfileRevision = 1;
 }
 
 const ReceiverSettings& receiver() {
@@ -303,6 +428,49 @@ void resetCloud() {
     preferences.end();
   }
   loadCloudDefaults();
+}
+
+const ProfileSettings& profile() {
+  begin();
+  return currentProfile;
+}
+
+bool saveProfile(const String& nickname, bool functionTestEnabled,
+                 bool aiSceneTestEnabled, function_area::Scene testScene) {
+  begin();
+  String normalizedNickname = nickname;
+  normalizedNickname.trim();
+  if (normalizedNickname.isEmpty() ||
+      normalizedNickname.length() >= sizeof(currentProfile.nickname) ||
+      !validNickname(normalizedNickname.c_str()) ||
+      !function_area::isValid(testScene)) {
+    return false;
+  }
+
+  ProfileRecord record = {};
+  record.magic = kProfileMagic;
+  record.version = kProfileVersion;
+  record.functionTestEnabled = functionTestEnabled ? 1 : 0;
+  record.aiSceneTestEnabled = aiSceneTestEnabled ? 1 : 0;
+  record.testScene = static_cast<uint8_t>(testScene);
+  copyText(record.nickname, sizeof(record.nickname),
+           normalizedNickname.c_str());
+
+  Preferences preferences;
+  if (!preferences.begin(kPreferencesNamespace, false)) return false;
+  const size_t bytesWritten =
+      preferences.putBytes(kProfileKey, &record, sizeof(record));
+  preferences.end();
+  if (bytesWritten != sizeof(record)) return false;
+
+  applyProfileRecord(record);
+  ++currentProfileRevision;
+  return true;
+}
+
+uint32_t profileRevision() {
+  begin();
+  return currentProfileRevision;
 }
 
 }  // namespace device_settings

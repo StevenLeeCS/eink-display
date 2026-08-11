@@ -3,11 +3,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <cstring>
+#include <cstdlib>
 
 #include "device_settings.h"
 #include "inmp441_audio.h"
 #include "task_processing.h"
+#include "task_store.h"
 #include "ui_layout.h"
 #include "wifi_provisioning.h"
 
@@ -55,8 +56,9 @@ bool initialized = false;
 EventCallback eventCallback = nullptr;
 
 void emitRegionEvent(uint8_t region, RegionEvent event,
-                     const char* text = nullptr) {
-  if (eventCallback != nullptr) eventCallback(region, event, text);
+                     const char* text = nullptr,
+                     const task_store::TaskSchedule* schedule = nullptr) {
+  if (eventCallback != nullptr) eventCallback(region, event, text, schedule);
 }
 
 bool configurationIsReady() {
@@ -155,7 +157,8 @@ void updateSpeechDetection(const int16_t* samples, size_t count,
 }
 
 bool readHttpResponse(WiFiClient& client, String& responseBody,
-                      bool& speechDetected, bool& taskDetected) {
+                      bool& speechDetected, bool& taskDetected,
+                      task_store::TaskSchedule& schedule) {
   client.setTimeout(60000);
   const String statusLine = client.readStringUntil('\n');
   Serial.print("Server response: ");
@@ -174,6 +177,17 @@ bool readHttpResponse(WiFiClient& client, String& responseBody,
       speechDetected = header.substring(18).toInt() == 1;
     } else if (header.startsWith("X-Task-Detected:")) {
       taskDetected = header.substring(16).toInt() == 1;
+    } else if (header.startsWith("X-Task-Time-Kind:")) {
+      String kind = header.substring(17);
+      kind.trim();
+      schedule.kind =
+          kind == "exact" ? task_store::ScheduleKind::Exact
+          : kind == "window" ? task_store::ScheduleKind::Window
+                             : task_store::ScheduleKind::None;
+    } else if (header.startsWith("X-Task-Start-At:")) {
+      schedule.startAt = strtoull(header.substring(16).c_str(), nullptr, 10);
+    } else if (header.startsWith("X-Task-End-At:")) {
+      schedule.endAt = strtoull(header.substring(14).c_str(), nullptr, 10);
     }
   }
 
@@ -189,6 +203,13 @@ bool readHttpResponse(WiFiClient& client, String& responseBody,
     delay(1);
   }
   responseBody.trim();
+  const bool exactValid = schedule.kind == task_store::ScheduleKind::Exact &&
+                          schedule.startAt != 0 &&
+                          schedule.startAt == schedule.endAt;
+  const bool windowValid = schedule.kind == task_store::ScheduleKind::Window &&
+                           schedule.startAt != 0 &&
+                           schedule.startAt < schedule.endAt;
+  if (!exactValid && !windowValid) schedule = {};
   return success;
 }
 
@@ -357,8 +378,10 @@ void handleButtonPress(uint8_t region, uint8_t requiredMask,
   // A missing header from an older receiver must never clear display content.
   bool speechDetected = true;
   bool taskDetected = true;
+  task_store::TaskSchedule schedule = {};
   const bool success =
-      readHttpResponse(client, recognizedText, speechDetected, taskDetected);
+      readHttpResponse(client, recognizedText, speechDetected, taskDetected,
+                       schedule);
   client.stop();
   if (success) {
     Serial.println("Recognition result:");
@@ -380,7 +403,7 @@ void handleButtonPress(uint8_t region, uint8_t requiredMask,
           taskDetected ? RegionEvent::Recognition
                        : RegionEvent::RecognitionNoHistory;
       emitRegionEvent(region, resultEvent,
-                      displayText.c_str());
+                      displayText.c_str(), taskDetected ? &schedule : nullptr);
     }
     Serial.println("Press and hold a region button to record again.");
   } else {

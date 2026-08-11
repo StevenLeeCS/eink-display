@@ -262,8 +262,15 @@ def _task_from_mapping(value: Any) -> TaskRecord:
     if not isinstance(reason, str):
         raise CloudResponseError("task field 'reason' must be a string")
     if not is_task:
-        return TaskRecord(is_task=False, reason=reason.strip()[:96])
-    return TaskRecord(**fields, is_task=True, reason=reason.strip()[:96])
+        return TaskRecord(
+            is_task=False,
+            reason=reason.strip()[:96],
+        )
+    return TaskRecord(
+        **fields,
+        is_task=True,
+        reason=reason.strip()[:96],
+    )
 
 
 def parse_task_json(content: str) -> TaskRecord:
@@ -290,17 +297,23 @@ class DeepSeekClient:
         self.config = config
         self._opener = opener
 
-    def structure_transcript(self, transcript: str) -> TaskRecord:
+    def structure_transcript(
+        self,
+        transcript: str,
+        *,
+        current_time: str = "",
+    ) -> TaskRecord:
         if not transcript.strip():
             raise CloudServiceError("transcript is empty")
         key = _require(self.config.api_key, "DEEPSEEK_API_KEY")
+        required_fields = "is_task、time、place、event、reason"
         prompt = (
             "判断下面的中文语音转写是否是一项需要执行、提醒或记录完成状态的待办事项，"
             "并整理为 JSON。第一人称的未来计划、意图或义务，即使采用陈述句表达，"
             "也属于待办；省略主语但包含未来可执行动作的短句也属于待办。已经完成的"
             "过去事实、单纯状态、闲聊、提问或无法执行的内容不属于待办。无法确定但"
             "包含明确可执行动作时，优先按待办处理，避免漏记。只输出 JSON 对象，字段"
-            "必须是 is_task、time、place、event、reason，is_task 必须为布尔值。"
+            f"必须是 {required_fields}，is_task 必须为布尔值。"
             "缺失字段填空字符串，不得编造信息。把不改变含义的口语改为简洁书面表达，"
             "例如‘一会儿、待会儿、等一下’写为‘稍后’，但不得把相对时间编造成具体"
             "钟点。time、place、event 分别最多13个全角中文字符或26个半角字符，"
@@ -316,6 +329,7 @@ class DeepSeekClient:
             "\"event\":\"\",\"reason\":\"单纯状态\"}。\n转写："
             + transcript
         )
+        prompt += f"\n服务器当前时间：{current_time or '未知'}"
         body = json.dumps(
             {
                 "model": self.config.model,
