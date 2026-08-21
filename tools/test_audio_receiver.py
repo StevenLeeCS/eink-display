@@ -19,6 +19,7 @@ from recognition_pipeline import (
     RecognitionPipeline,
     RecognitionResult,
     fit_display_text,
+    parse_pomodoro_minutes,
     structure_for_display,
 )
 
@@ -113,6 +114,20 @@ class ChunkedAudioTest(unittest.TestCase):
 
 
 class RecognitionPipelineTest(unittest.TestCase):
+    def test_parses_pomodoro_minutes(self) -> None:
+        self.assertEqual(
+            (25, 5), parse_pomodoro_minutes("专注二十五分钟,休息5分钟")
+        )
+        self.assertEqual(
+            (40, None), parse_pomodoro_minutes("专注时间改成40分钟")
+        )
+        self.assertEqual(
+            (None, 10), parse_pomodoro_minutes("休息设为十分钟")
+        )
+
+    def test_rejects_unlabelled_pomodoro_duration(self) -> None:
+        self.assertEqual((None, None), parse_pomodoro_minutes("设置二十五分钟"))
+
     def test_display_text_is_limited_to_three_lines(self) -> None:
         displayed = fit_display_text("一" * 60)
 

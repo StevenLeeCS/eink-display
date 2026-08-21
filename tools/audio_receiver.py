@@ -31,7 +31,11 @@ from cloud_services import (
     DeepSeekConfig,
     DeepSeekClient,
 )
-from recognition_pipeline import RecognitionPipeline, RecognitionResult
+from recognition_pipeline import (
+    RecognitionPipeline,
+    RecognitionResult,
+    parse_pomodoro_minutes,
+)
 
 
 MAX_RECORDING_SECONDS = 60
@@ -161,6 +165,11 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Expected 16 kHz, mono, signed PCM16")
             return
 
+        recognition_mode = self.headers.get("X-Recognition-Mode", "task").lower()
+        if recognition_mode not in {"task", "pomodoro"}:
+            self.send_error(400, "Unknown recognition mode")
+            return
+
         transfer_encoding = self.headers.get("Transfer-Encoding", "").lower()
         chunked = transfer_encoding == "chunked"
         if transfer_encoding and not chunked:
@@ -242,6 +251,7 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
             result = server.recognition_pipeline.recognize(
                 final_path,
                 request_id=timestamp,
+                structure_task=recognition_mode != "pomodoro",
             )
         except CloudServiceError as error:
             finalize_recording(
@@ -282,6 +292,16 @@ class AudioReceiverHandler(BaseHTTPRequestHandler):
         self.send_header("X-Task-Time-Kind", result.schedule.kind)
         self.send_header("X-Task-Start-At", str(result.schedule.start_at))
         self.send_header("X-Task-End-At", str(result.schedule.end_at))
+        if recognition_mode == "pomodoro":
+            focus_minutes, break_minutes = parse_pomodoro_minutes(result.text)
+            self.send_header(
+                "X-Pomodoro-Focus-Minutes",
+                str(focus_minutes if focus_minutes is not None else -1),
+            )
+            self.send_header(
+                "X-Pomodoro-Break-Minutes",
+                str(break_minutes if break_minutes is not None else -1),
+            )
         self.end_headers()
         self.wfile.write(body)
 

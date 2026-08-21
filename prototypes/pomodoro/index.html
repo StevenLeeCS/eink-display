@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f3f4f2">
+  <title>番茄钟原型</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <div><h1>番茄钟</h1><p>专注与休息正计时</p></div>
+      <span class="prototype-badge">本机预览</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="device-preview" aria-labelledby="display-heading">
+      <div class="section-heading"><h2 id="display-heading">墨水屏功能区预览</h2><span id="mode-state" class="mode-state">普通模式</span></div>
+      <div class="eink-display">
+        <div id="display-name">同学,</div>
+        <div id="display-message">欢迎使用电纸便利贴!</div>
+        <div id="display-emoticon">^_^</div>
+      </div>
+    </section>
+
+    <section class="timer-card" aria-labelledby="timer-heading">
+      <h2 id="timer-heading" class="visually-hidden">计时器</h2>
+
+      <div class="timer-stage" aria-live="polite">
+        <div id="timer-status" class="timer-status">准备开始</div>
+        <div id="timer-readout" class="timer-readout">00:00</div>
+        <div class="progress" aria-hidden="true"><span id="progress-fill"></span></div>
+      </div>
+
+      <div class="button-simulator">
+        <label for="voice-command">模拟长按时说话</label>
+        <input id="voice-command" type="text" placeholder="例如: 专注40分钟,休息10分钟" autocomplete="off">
+        <button id="hardware-button" class="hardware-button" type="button">
+          <span>番茄钟按键</span>
+          <small id="hold-status">按住测试</small>
+        </button>
+        <div class="gesture-hints">
+          <span>短按: 开始/暂停</span>
+          <span>双击: 切换阶段</span>
+          <span>静音长按3秒: 进入/退出</span>
+        </div>
+      </div>
+
+      <div class="meta">
+        <span>阶段 <strong id="phase-label">专注</strong></span>
+        <span>第 <strong id="round-label">1</strong> 轮</span>
+        <span>目标 <strong id="target-label">25 分钟</strong></span>
+      </div>
+    </section>
+
+    <section class="backend-section">
+      <div class="section-heading"><h2>后台设置</h2><span>复杂配置保留在后台</span></div>
+      <div class="settings-grid backend-settings">
+        <div class="settings">
+          <label for="focus-minutes">默认专注目标</label>
+          <div class="duration-input"><input id="focus-minutes" type="number" min="1" max="180" step="1" value="25" inputmode="numeric"><span>分钟</span></div>
+        </div>
+        <div class="settings">
+          <label for="break-minutes">默认休息目标</label>
+          <div class="duration-input"><input id="break-minutes" type="number" min="1" max="60" step="1" value="5" inputmode="numeric"><span>分钟</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="history-section">
+      <div class="section-heading"><h2>计时记录</h2><button id="clear-history" type="button">清空</button></div>
+      <div id="history-list" class="history-list"><div class="empty-history">暂无计时记录</div></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -3,13 +3,15 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 
+#include "board_pins.h"
+
 namespace inmp441_audio {
 namespace {
 
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
-constexpr int kPinBclk = 7;    // XIAO D5 -> INMP441 SCK
-constexpr int kPinLrclk = 21;  // XIAO D6 -> INMP441 WS
-constexpr int kPinData = 20;   // XIAO D7 <- INMP441 SD
+constexpr int kPinBclk = board_pins::kMicrophoneBclk;
+constexpr int kPinLrclk = board_pins::kMicrophoneLrclk;
+constexpr int kPinData = board_pins::kMicrophoneData;
 
 int32_t rawSamples[kMaxSamplesPerRead];
 bool initialized = false;
@@ -61,7 +63,8 @@ bool begin() {
   i2s_zero_dma_buffer(kI2sPort);
   initialized = true;
   Serial.println("INMP441 ready: 16000 Hz, mono, PCM16");
-  Serial.println("SCK=D5, WS=D6, SD=D7, L/R=GND");
+  Serial.printf("SCK=GPIO%d, WS=GPIO%d, SD=GPIO%d, L/R=GND\n",
+                kPinBclk, kPinLrclk, kPinData);
   return true;
 }
 

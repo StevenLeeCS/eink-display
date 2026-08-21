@@ -4,9 +4,11 @@
 #include <time.h>
 
 #include "ascii_font_16.h"
+#include "board_pins.h"
 #include "chinese_font_16.h"
 #include "device_settings.h"
 #include "function_area.h"
+#include "pomodoro.h"
 #include "task_scheduler.h"
 #include "task_store.h"
 #include "ui_layout.h"
@@ -24,13 +26,12 @@ constexpr size_t kFrameBytes = kPanelWidth * kPanelHeight / 8;
 static_assert(kDisplayWidth * kDisplayHeight == kPanelWidth * kPanelHeight,
               "Portrait and panel frame areas must match");
 
-// XIAO ESP32-C3 pin labels and GPIO numbers.
-constexpr int kPinMosi = 10;  // D10
-constexpr int kPinSck = 8;    // D8
-constexpr int kPinCs = 3;     // D1
-constexpr int kPinDc = 4;     // D2
-constexpr int kPinReset = 5;  // D3
-constexpr int kPinBusy = 6;   // D4, HIGH while SSD1683 is busy
+constexpr int kPinMosi = board_pins::kEpaperMosi;
+constexpr int kPinSck = board_pins::kEpaperSck;
+constexpr int kPinCs = board_pins::kEpaperCs;
+constexpr int kPinDc = board_pins::kEpaperDc;
+constexpr int kPinReset = board_pins::kEpaperReset;
+constexpr int kPinBusy = board_pins::kEpaperBusy;
 
 constexpr uint32_t kSpiFrequency = 4000000;
 constexpr uint32_t kBusyTimeoutMs = 30000;
@@ -49,6 +50,8 @@ constexpr uint16_t kFunctionTextX = 8;
 constexpr uint16_t kFunctionTextRight = kDisplayWidth - 8;
 constexpr uint16_t kFunctionFirstLineOffset = 2;
 constexpr uint16_t kFunctionLineHeight = 22;
+constexpr int8_t kSlotTextOffsets[ui_layout::kDisplaySlotCount] = {
+    -4, 0, 0, 4, 4};  // About 1 mm at the panel's pixel density.
 constexpr uint32_t kFullWidthExclamation = 0xFF01;
 constexpr uint8_t kPartialRefreshesBeforeFull = 4;
 
@@ -218,9 +221,10 @@ bool functionAreaDirty = false;
 void setPixel(uint16_t x, uint16_t y, bool black) {
   if (x >= kDisplayWidth || y >= kDisplayHeight) return;
 
-  // Logical portrait coordinates map to a panel rotated clockwise.
-  const uint16_t panelX = y;
-  const uint16_t panelY = kPanelHeight - 1 - x;
+  // Map portrait coordinates to the panel with the display turned 180 degrees
+  // from the original clockwise orientation.
+  const uint16_t panelX = kPanelWidth - 1 - y;
+  const uint16_t panelY = x;
   const size_t index = panelY * kPanelStride + panelX / 8;
   const uint8_t mask = 0x80U >> (panelX & 0x07U);
   if (black) {
@@ -380,6 +384,11 @@ uint16_t slotTop(uint8_t slot) {
   return static_cast<uint16_t>(slot) * kSlotPitch;
 }
 
+uint16_t slotTextY(uint8_t slot, uint16_t y) {
+  return static_cast<uint16_t>(static_cast<int32_t>(y) +
+                               kSlotTextOffsets[slot]);
+}
+
 void clearDisplaySlot(uint8_t slot) {
   const uint16_t yStart = slotTop(slot);
   const uint16_t yEnd =
@@ -432,8 +441,8 @@ bool drawCenteredSlotText(uint8_t slot, const char* text) {
   drawSlotDividers();
   const uint16_t blockHeight = font16::kGlyphHeight +
       static_cast<uint16_t>(lineCount - 1) * kTextLineHeight;
-  const uint16_t firstY = slotTop(slot) +
-      (kSlotVisibleHeight - blockHeight) / 2;
+  const uint16_t firstY = slotTextY(
+      slot, slotTop(slot) + (kSlotVisibleHeight - blockHeight) / 2);
   bool drewText = false;
   for (uint8_t line = 0; line < lineCount; ++line) {
     uint16_t textWidth = 0;
@@ -461,17 +470,84 @@ bool drawMarkerFreeTaskRegion(uint8_t region, const char* text) {
 bool drawInitialRegion(uint8_t region) {
   if (region >= ui_layout::kTaskRegionCount) return false;
   constexpr const char* kPrompts[ui_layout::kTaskRegionCount] = {
-      u8"\u6309\u4F4F A1 \u8F93\u5165",
-      u8"\u6309\u4F4F A2 \u8F93\u5165",
-      u8"\u6309\u4F4F A3 \u8F93\u5165",
-      u8"\u6309\u4F4F A4 \u8F93\u5165",
+      u8"\u6309\u4F4F B4 \u8F93\u5165",
+      u8"\u6309\u4F4F B5 \u8F93\u5165",
+      u8"\u6309\u4F4F B6 \u8F93\u5165",
+      u8"\u6309\u4F4F B7 \u8F93\u5165",
   };
   regionCompleted[region] = false;
   regionHasResult[region] = false;
   return drawCenteredSlotText(region, kPrompts[region]);
 }
 
+bool drawFunctionPresentation(const char* message, const char* emoticon) {
+  const device_settings::ProfileSettings& profile =
+      device_settings::profile();
+  const String salutation = String(profile.nickname) + ',';
+
+  uint16_t salutationWidth = 0;
+  uint16_t messageWidth = 0;
+  uint16_t emoticonWidth = 0;
+  if (!measureText16(salutation.c_str(), salutationWidth) ||
+      !measureText16(message, messageWidth) ||
+      !measureText16(emoticon, emoticonWidth) ||
+      salutationWidth > kFunctionTextRight - kFunctionTextX ||
+      messageWidth > kFunctionTextRight - kFunctionTextX ||
+      emoticonWidth > kFunctionTextRight - kFunctionTextX) {
+    return false;
+  }
+
+  clearDisplaySlot(ui_layout::kFunctionSlot);
+  drawSlotDividers();
+  const uint16_t firstY = slotTextY(
+      ui_layout::kFunctionSlot,
+      slotTop(ui_layout::kFunctionSlot) + kFunctionFirstLineOffset);
+  return drawText16(kFunctionTextX, firstY, salutation.c_str()) &&
+         drawText16(kFunctionTextX, firstY + kFunctionLineHeight,
+                    message) &&
+         drawText16(kFunctionTextRight - emoticonWidth,
+                    firstY + 2 * kFunctionLineHeight,
+                    emoticon);
+}
+
+bool drawPomodoroPresentation(const pomodoro::Presentation& presentation) {
+  uint16_t line1Width = 0;
+  uint16_t line2Width = 0;
+  uint16_t line3Width = 0;
+  uint16_t emoticonWidth = 0;
+  if (!measureText16(presentation.line1, line1Width) ||
+      !measureText16(presentation.line2, line2Width) ||
+      !measureText16(presentation.line3, line3Width) ||
+      !measureText16(presentation.emoticon, emoticonWidth)) {
+    return false;
+  }
+  const uint16_t availableWidth = kFunctionTextRight - kFunctionTextX;
+  if (line1Width > availableWidth || line2Width > availableWidth ||
+      emoticonWidth + 8 > availableWidth ||
+      line3Width > availableWidth - emoticonWidth - 8) {
+    return false;
+  }
+  const uint16_t emoticonX = kFunctionTextRight - emoticonWidth;
+
+  clearDisplaySlot(ui_layout::kFunctionSlot);
+  drawSlotDividers();
+  const uint16_t firstY = slotTextY(
+      ui_layout::kFunctionSlot,
+      slotTop(ui_layout::kFunctionSlot) + kFunctionFirstLineOffset);
+  return drawText16(kFunctionTextX, firstY, presentation.line1) &&
+         drawText16(kFunctionTextX, firstY + kFunctionLineHeight,
+                    presentation.line2) &&
+         drawText16(kFunctionTextX, firstY + 2 * kFunctionLineHeight,
+                    presentation.line3) &&
+         drawText16(emoticonX, firstY + 2 * kFunctionLineHeight,
+                    presentation.emoticon);
+}
+
 bool drawFunctionArea() {
+  if (pomodoro::state().active) {
+    const pomodoro::Presentation& presentation = pomodoro::presentation();
+    return drawPomodoroPresentation(presentation);
+  }
   const device_settings::ProfileSettings& profile =
       device_settings::profile();
   const function_area::Scene scene =
@@ -481,30 +557,8 @@ bool drawFunctionArea() {
                                         : profile.testScene);
   const function_area::Presentation& presentation =
       function_area::presentationFor(scene);
-  const String salutation = String(profile.nickname) + ',';
-
-  uint16_t salutationWidth = 0;
-  uint16_t messageWidth = 0;
-  uint16_t emoticonWidth = 0;
-  if (!measureText16(salutation.c_str(), salutationWidth) ||
-      !measureText16(presentation.message, messageWidth) ||
-      !measureText16(presentation.emoticon, emoticonWidth) ||
-      salutationWidth > kFunctionTextRight - kFunctionTextX ||
-      messageWidth > kFunctionTextRight - kFunctionTextX ||
-      emoticonWidth > kFunctionTextRight - kFunctionTextX) {
-    return false;
-  }
-
-  clearDisplaySlot(ui_layout::kFunctionSlot);
-  drawSlotDividers();
-  const uint16_t firstY =
-      slotTop(ui_layout::kFunctionSlot) + kFunctionFirstLineOffset;
-  return drawText16(kFunctionTextX, firstY, salutation.c_str()) &&
-         drawText16(kFunctionTextX, firstY + kFunctionLineHeight,
-                    presentation.message) &&
-         drawText16(kFunctionTextRight - emoticonWidth,
-                    firstY + 2 * kFunctionLineHeight,
-                    presentation.emoticon);
+  return drawFunctionPresentation(presentation.message,
+                                  presentation.emoticon);
 }
 
 bool drawInitialDisplay() {
@@ -520,6 +574,7 @@ bool refreshDisplaySlot(uint8_t slot);
 void applyScheduledFunctionScene(function_area::Scene scene) {
   if (!function_area::isValid(scene)) return;
   activeFunctionScene = scene;
+  if (pomodoro::state().active) return;
   if (!drawFunctionArea()) {
     Serial.println("ERROR: Scheduled function scene could not be rendered.");
     return;
@@ -537,6 +592,7 @@ void refreshFunctionAreaIfChanged() {
   const uint32_t revision = device_settings::profileRevision();
   if (!voiceDisplayReady || revision == renderedProfileRevision) return;
   renderedProfileRevision = revision;
+  if (pomodoro::state().active) return;
   if (device_settings::profile().functionTestEnabled &&
       device_settings::profile().aiSceneTestEnabled) {
     task_scheduler::settingsChanged();
@@ -550,6 +606,37 @@ void refreshFunctionAreaIfChanged() {
   const bool refreshed = refreshDisplaySlot(ui_layout::kFunctionSlot);
   Serial.println(refreshed ? "Function area profile displayed."
                            : "ERROR: Function area refresh failed.");
+}
+
+void refreshPomodoroArea() {
+  if (!pomodoro::state().active) {
+    task_scheduler::resetToWelcome();
+    activeFunctionScene = function_area::Scene::Welcome;
+    const function_area::Presentation& welcome =
+        function_area::presentationFor(function_area::Scene::Welcome);
+    if (!drawFunctionPresentation(welcome.message, welcome.emoticon)) {
+      Serial.println("ERROR: Welcome function area could not be rendered.");
+      return;
+    }
+    functionAreaDirty = true;
+    if (!voiceDisplayReady) return;
+    const bool refreshed = refreshDisplaySlot(ui_layout::kFunctionSlot);
+    if (refreshed) functionAreaDirty = false;
+    Serial.println(refreshed ? "Welcome function area displayed."
+                             : "ERROR: Welcome display refresh failed.");
+    return;
+  }
+  const pomodoro::Presentation& presentation = pomodoro::presentation();
+  if (!drawPomodoroPresentation(presentation)) {
+    Serial.println("ERROR: Pomodoro function area could not be rendered.");
+    return;
+  }
+  functionAreaDirty = true;
+  if (!voiceDisplayReady) return;
+  const bool refreshed = refreshDisplaySlot(ui_layout::kFunctionSlot);
+  if (refreshed) functionAreaDirty = false;
+  Serial.println(refreshed ? "Pomodoro function area displayed."
+                           : "ERROR: Pomodoro display refresh failed.");
 }
 
 bool refreshDisplaySlot(uint8_t slot) {
@@ -575,7 +662,8 @@ bool drawRecognitionRegion(uint8_t region, const char* text) {
   regionCompleted[region] = false;
   regionHasResult[region] = true;
   regionMarkerX[region] = kTaskMarkerX;
-  const uint16_t textY = slotTop(region) + kSlotTextTopPadding;
+  const uint16_t textY =
+      slotTextY(region, slotTop(region) + kSlotTextTopPadding);
   regionMarkerY[region] =
       textY + (font16::kGlyphHeight - kTaskMarkerSize) / 2;
   drawCompletionMarker(regionMarkerX[region], regionMarkerY[region], false);
@@ -729,6 +817,7 @@ void setup() {
   if (!task_store::begin()) {
     Serial.println("ERROR: Task cache is unavailable.");
   }
+  pomodoro::begin(refreshPomodoroArea);
   task_scheduler::begin(applyScheduledFunctionScene);
   if (!drawInitialDisplay()) {
     Serial.println("ERROR: Initial five-slot display could not be rendered.");
@@ -751,4 +840,5 @@ void loop() {
   voice_upload::poll();
   refreshFunctionAreaIfChanged();
   task_scheduler::poll();
+  pomodoro::poll();
 }

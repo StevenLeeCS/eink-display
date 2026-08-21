@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "device_settings.h"
+#include "pomodoro.h"
 #include "task_store.h"
 
 extern const uint8_t admin_html_start[]
@@ -339,6 +340,52 @@ void registerStatusRoutes(WebServer& server) {
     response += F("]}");
     sendJson(server, 200, response);
   });
+
+  server.on("/api/pomodoro", HTTP_GET, [&server]() {
+    const pomodoro::State& state = pomodoro::state();
+    String response;
+    response.reserve(2048);
+    response += F("{\"active\":");
+    response += state.active ? F("true") : F("false");
+    response += F(",\"running\":");
+    response += state.running ? F("true") : F("false");
+    response += F(",\"phase\":\"");
+    response += state.phase == pomodoro::Phase::Focus ? F("focus")
+                                                       : F("break");
+    response += F("\",\"round\":");
+    response += state.round;
+    response += F(",\"focus_minutes\":");
+    response += state.focusMinutes;
+    response += F(",\"break_minutes\":");
+    response += state.breakMinutes;
+    response += F(",\"elapsed_seconds\":");
+    response += pomodoro::elapsedSeconds();
+    response += F(",\"total_focus_seconds\":");
+    response += state.totalFocusSeconds;
+    response += F(",\"total_break_seconds\":");
+    response += state.totalBreakSeconds;
+    response += F(",\"completed_focus_rounds\":");
+    response += state.completedFocusRounds;
+    response += F(",\"history\":[");
+    bool first = true;
+    for (size_t index = 0; index < pomodoro::historyCount(); ++index) {
+      pomodoro::HistoryEntry entry = {};
+      if (!pomodoro::history(index, entry)) continue;
+      if (!first) response += ',';
+      first = false;
+      response += F("{\"ended_at\":");
+      appendUint64(response, entry.endedAt);
+      response += F(",\"focus_seconds\":");
+      response += entry.focusSeconds;
+      response += F(",\"break_seconds\":");
+      response += entry.breakSeconds;
+      response += F(",\"focus_rounds\":");
+      response += entry.focusRounds;
+      response += '}';
+    }
+    response += F("]}");
+    sendJson(server, 200, response);
+  });
 }
 
 void registerConfigurationRoutes(WebServer& server) {
@@ -458,6 +505,65 @@ void registerConfigurationRoutes(WebServer& server) {
       return;
     }
     sendMessage(server, 200, F("完成记录已清除"));
+  });
+
+  server.on("/api/pomodoro/configure", HTTP_POST, [&server]() {
+    const long focusMinutes = server.arg("focus_minutes").toInt();
+    const long breakMinutes = server.arg("break_minutes").toInt();
+    if (focusMinutes < 1 || focusMinutes > 180 || breakMinutes < 1 ||
+        breakMinutes > 60 ||
+        !pomodoro::configure(static_cast<uint16_t>(focusMinutes),
+                             static_cast<uint16_t>(breakMinutes))) {
+      sendMessage(server, 400, F("专注或休息时长无效"));
+      return;
+    }
+    sendMessage(server, 200, F("番茄钟时长已保存"));
+  });
+
+  server.on("/api/pomodoro/enter", HTTP_POST, [&server]() {
+    if (!pomodoro::enter()) {
+      sendMessage(server, 409, F("番茄钟已处于启用状态"));
+      return;
+    }
+    sendMessage(server, 200, F("已进入番茄钟模式"));
+  });
+
+  server.on("/api/pomodoro/exit", HTTP_POST, [&server]() {
+    if (!pomodoro::exit()) {
+      sendMessage(server, 409, F("番茄钟尚未启用"));
+      return;
+    }
+    sendMessage(server, 200, F("已退出番茄钟模式并保存本次记录"));
+  });
+
+  server.on("/api/pomodoro/toggle", HTTP_POST, [&server]() {
+    if (!pomodoro::state().active) {
+      sendMessage(server, 409, F("请先进入番茄钟模式"));
+      return;
+    }
+    if (!pomodoro::toggleRunning()) {
+      sendMessage(server, 503, F("设备时间尚未同步，请稍后重试"));
+      return;
+    }
+    sendMessage(server, 200,
+                pomodoro::state().running ? F("计时已开始")
+                                           : F("计时已暂停"));
+  });
+
+  server.on("/api/pomodoro/switch", HTTP_POST, [&server]() {
+    if (!pomodoro::switchPhase()) {
+      sendMessage(server, 409, F("请先进入番茄钟模式"));
+      return;
+    }
+    sendMessage(server, 200, F("专注/休息阶段已切换，当前为暂停状态"));
+  });
+
+  server.on("/api/pomodoro/history/clear", HTTP_POST, [&server]() {
+    if (!pomodoro::clearHistory()) {
+      sendMessage(server, 500, F("清除番茄钟记录失败"));
+      return;
+    }
+    sendMessage(server, 200, F("番茄钟记录已清除"));
   });
 }
 

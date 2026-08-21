@@ -4,6 +4,7 @@
 #include <time.h>
 
 #include "device_settings.h"
+#include "pomodoro.h"
 #include "task_store.h"
 
 namespace task_scheduler {
@@ -186,6 +187,10 @@ void begin(SceneCallback callback) {
 }
 
 void poll() {
+  if (pomodoro::state().active) {
+    lastPollAt = millis();
+    return;
+  }
   if (!automaticEnabled() || millis() - lastPollAt < kPollIntervalMs) return;
   lastPollAt = millis();
   const uint64_t now = nowEpoch();
@@ -221,22 +226,37 @@ void poll() {
 }
 
 void taskStored() {
+  if (pomodoro::state().active) return;
   evaluateAfterTaskChange(function_area::Scene::NextAction);
 }
 
 void taskRemoved() {
+  if (pomodoro::state().active) return;
   evaluateAfterTaskChange(function_area::Scene::Welcome);
 }
 
 void completionChanged(bool completed) {
+  if (pomodoro::state().active) return;
   evaluateAfterTaskChange(completed ? function_area::Scene::Summary
                                     : function_area::Scene::NextAction);
 }
 
 void settingsChanged() {
+  if (pomodoro::state().active) return;
   if (!automaticEnabled()) return;
   evaluateAfterTaskChange(currentScene);
   if (sceneCallback != nullptr) sceneCallback(currentScene);
+}
+
+void resetToWelcome() {
+  if (pomodoro::state().active) return;
+  currentScene = function_area::Scene::Welcome;
+  currentSceneShownAt = nowEpoch();
+  lastPollAt = millis();
+  if (!task_store::setFunctionState(
+          static_cast<uint8_t>(currentScene), currentSceneShownAt)) {
+    Serial.println("WARNING: Welcome scene state could not be saved.");
+  }
 }
 
 }  // namespace task_scheduler

@@ -12,5 +12,6 @@ void taskStored();
 void taskRemoved();
 void completionChanged(bool completed);
 void settingsChanged();
+void resetToWelcome();
 
 }  // namespace task_scheduler

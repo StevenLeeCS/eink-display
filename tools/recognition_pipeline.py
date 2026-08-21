@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 import threading
 from typing import Any, Protocol
 import unicodedata
@@ -107,6 +108,58 @@ def task_for_display(task: TaskRecord, transcript: str) -> tuple[str, bool]:
     return format_task(task, transcript), True
 
 
+_CHINESE_DIGITS = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+
+def _chinese_integer(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    total = 0
+    section = 0
+    digit = 0
+    for character in value:
+        if character in _CHINESE_DIGITS:
+            digit = _CHINESE_DIGITS[character]
+        elif character == "十":
+            section += (digit or 1) * 10
+            digit = 0
+        elif character == "百":
+            section += (digit or 1) * 100
+            digit = 0
+        else:
+            return None
+    total += section + digit
+    return total if total > 0 else None
+
+
+def parse_pomodoro_minutes(transcript: str) -> tuple[int | None, int | None]:
+    """Extract explicitly labelled focus/rest minute values from speech."""
+
+    compact = re.sub(r"\s+", "", transcript)
+
+    def value_after(keyword: str) -> int | None:
+        match = re.search(
+            rf"{keyword}(?:时间)?(?:改成|设置为|设为|是|为)?"
+            r"([0-9零一二两三四五六七八九十百]+)(?:分钟|分)",
+            compact,
+        )
+        return _chinese_integer(match.group(1)) if match else None
+
+    return value_after("专注"), value_after("休息")
+
+
 class RecognitionPipeline:
     """Run one WAV recording through STT, task structuring and text cleanup."""
 
@@ -137,6 +190,7 @@ class RecognitionPipeline:
         wav_path: Path,
         *,
         request_id: str | None = None,
+        structure_task: bool = True,
     ) -> RecognitionResult:
         with self._lock:
             transcript = self._transcribe(wav_path)
@@ -151,7 +205,11 @@ class RecognitionPipeline:
             display_text = transcript
             schedule = TaskSchedule()
 
-            if speech_detected and self.deepseek_client is not None:
+            if (
+                speech_detected
+                and structure_task
+                and self.deepseek_client is not None
+            ):
                 try:
                     current_time = datetime.now(PRODUCT_TIMEZONE)
                     task = self.deepseek_client.structure_transcript(
@@ -221,6 +279,7 @@ __all__ = [
     "RecognitionPipeline",
     "RecognitionResult",
     "fit_display_text",
+    "parse_pomodoro_minutes",
     "structure_for_display",
     "task_for_display",
 ]
